@@ -1,0 +1,45 @@
+# Local vendor documentation and reference projects
+/docs/
+
+# Generated logs and results; keep directory placeholders
+/logs/*
+!/logs/.gitkeep
+/results/*
+!/results/.gitkeep
+
+# MATLAB generated files
+*.asv
+*.autosave
+*.m~
+*.slxc
+slprj/
+codegen/
+
+# Vivado/XSim generated files and project state
+.Xil/
+*.cache/
+*.gen/
+*.hw/
+*.ip_user_files/
+*.runs/
+*.sim/
+*.srcs/
+*.jou
+*.log
+*.pb
+*.str
+*.wdb
+*.wcfg
+*.bit
+*.ltx
+*.dcp
+*.rpt
+vivado_pid*.str
+xsim.dir/
+
+# OS/editor local files
+.DS_Store
+Thumbs.db
+*.swp
+*~
+

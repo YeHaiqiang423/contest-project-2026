@@ -1,0 +1,24 @@
+{
+  "MATLAB.installPath": "G:\\Matlab",
+  "MATLAB.matlabConnectionTiming": "onDemand",
+  "MATLAB.defaultEditor": true,
+  "MATLAB.indexWorkspace": true,
+  "files.associations": {
+    "*.sv": "systemverilog",
+    "*.svh": "systemverilog",
+    "*.vh": "verilog",
+    "*.xdc": "tcl"
+  },
+  "files.exclude": {
+    "**/.Xil": true,
+    "**/*.cache": true,
+    "**/*.runs": true,
+    "**/*.sim": true
+  },
+  "search.exclude": {
+    "docs/**": true,
+    "logs/**": true,
+    "results/**": true
+  }
+}
+
