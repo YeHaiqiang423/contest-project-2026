@@ -1,0 +1,20 @@
+# Run this in the XSim Tcl Console after opening tb_g_frame_capture_sim.
+add_wave /tb_g_frame_capture/clk
+add_wave /tb_g_frame_capture/rst_n
+add_wave /tb_g_frame_capture/capture_enable
+add_wave /tb_g_frame_capture/sample_valid
+add_wave /tb_g_frame_capture/sample_data
+add_wave /tb_g_frame_capture/dut/decimation_count
+add_wave /tb_g_frame_capture/dut/write_addr
+add_wave /tb_g_frame_capture/dut/write_bank
+add_wave /tb_g_frame_capture/frame_ready
+add_wave /tb_g_frame_capture/frame_bank
+add_wave /tb_g_frame_capture/bank_pending
+add_wave /tb_g_frame_capture/read_enable
+add_wave /tb_g_frame_capture/read_bank
+add_wave /tb_g_frame_capture/read_addr
+add_wave /tb_g_frame_capture/read_data
+add_wave /tb_g_frame_capture/release_valid
+add_wave /tb_g_frame_capture/release_bank
+add_wave /tb_g_frame_capture/capture_stalled
+add_wave /tb_g_frame_capture/frame_overrun

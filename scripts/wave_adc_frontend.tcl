@@ -1,0 +1,12 @@
+# Run this in the XSim Tcl Console after opening tb_adc_sample_frontend_sim.
+add_wave /tb_adc_sample_frontend/clk_adc
+add_wave /tb_adc_sample_frontend/rst_n
+add_wave /tb_adc_sample_frontend/adc_valid
+add_wave /tb_adc_sample_frontend/adc_data_twos
+add_wave /tb_adc_sample_frontend/adc_data_offset
+add_wave /tb_adc_sample_frontend/sample_valid_twos
+add_wave /tb_adc_sample_frontend/sample_data_twos
+add_wave /tb_adc_sample_frontend/sample_valid_offset
+add_wave /tb_adc_sample_frontend/sample_data_offset
+add_wave /tb_adc_sample_frontend/dut_twos/decimation_count
+add_wave /tb_adc_sample_frontend/dut_offset/decimation_count

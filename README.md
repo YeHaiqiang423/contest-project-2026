@@ -7,7 +7,7 @@
 - 开发板：MicroPhase Mizar Z7，Zynq-7000 SoC
 - 目标器件：`xc7z020clg400-2`（以最终所用板卡丝印和工程设置为准）
 - PL 板载时钟：50 MHz，约束信号名 `PL_CLK_50M`；资料中的通用 XDC 也包含 `clk`/H16，使用前必须按顶层端口复核
-- ADC：Texas Instruments ADS6148
+- ADC：Texas Instruments ADS6149（实物丝印已确认；本地数据手册覆盖 ADS6149/ADS6148 系列）
 - DAC：Texas Instruments DAC5688
 - DAC 配置参考：STM32F103 + HAL/SPI/USB CDC 例程
 
@@ -69,3 +69,81 @@ powershell -ExecutionPolicy Bypass -File scripts/run_synth.ps1
 ## GitHub
 
 计划托管到 [YeHaiqiang423](https://github.com/YeHaiqiang423) 账户。创建远程仓库前先确认仓库名称和可见性；`docs/` 已由 `.gitignore` 整体排除。
+
+## 赛题目标与已确认硬件
+
+本仓库面向 2026 年 G 题“周期信号测量分析装置”。输入由基波和一至两个
+谐波组成，每项测量须在 2 s 内完成，并显示一或三个完整周期、峰峰值、真有效值、
+基波频率、定性频谱和各分量峰值幅度。电压/幅度绝对误差限为 5 mV，基波频率
+误差限为 1 kHz，频率分辨率要求 500 Hz。
+
+- 任务 1：100--250 mVpp，各分量 10--200 kHz。
+- 任务 2：50--250 mVpp，各分量 10--500 kHz。
+- 任务 3：任务 2 信号叠加 200 mVpp、1 MHz 及以上单音干扰，显示结果仍应描述
+  有用信号。
+
+已确认 ADC 实物为 ADS6149（14 bit，按 200 MSPS 使用）；ADC 接口相关 FPGA
+I/O 供电为 3.3 V，且板级电压匹配已经实测。系统只需使用一路 ADC。显示采用
+陶晶驰串口屏，因此 HDMI 不在设计范围内；串口屏具体型号、波特率和 FPGA 引脚
+待接线确定后再固化。ADC 数据脚仍应按 ADC 实际输出模式和参考设计选取 I/O
+标准，Bank 为 3.3 V 并不等于这些数据脚应直接约束为 `LVCMOS33`。
+
+## 测量架构
+
+```text
+BNC/50 ohm -> 模拟抗混叠/抑制干扰低通 -> ADA4937 -> ADS6149
+           -> 200 MSPS 采集 -> /10 -> 20 MSPS 数字低通
+           -> 波形/Upp/RMS 分支
+           -> /10 -> 2 MSPS、4096 点频谱分析
+           -> UART 数值与波形数据包
+```
+
+2 MSPS 下 4096 点变换的频率间隔为 488.28125 Hz。频谱峰用于定位分量，随后
+用正弦/余弦最小二乘拟合估计频率、相位和峰值幅度；`Urms` 根据谐波幅度计算，
+`Upp` 在稠密重建的一个基波周期上求取。任务 3 必须同时依赖模拟和数字滤波：
+模拟低通应通过 500 kHz，并从 1 MHz 起提供足够衰减，避免任意高频干扰在首次
+抽取时混叠进有用带宽。当前数字模型明确假设此前端条件成立。
+
+运行浮点黄金模型回归：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_g_model_regression.ps1
+powershell -ExecutionPolicy Bypass -File scripts/run_g_fixed_fir_analysis.ps1
+```
+
+回归会生成确定性的三项任务波形，模拟 14 bit/2 Vpp ADC 量化，逐项检查题目
+数值误差门槛，并把 CSV 与日志分别写入 `results/` 和 `logs/`。
+
+首个正式 RTL 为 `rtl/src/adc_sample_frontend.v`，负责 ADS6149 二补码/偏移二进制
+归一化和 200→20 MSPS 抽取。`rtl/src/g_symmetric_fir.v` 是 255 tap、Q1.17、
+13 路时分乘法的 20 MSPS 数字低通。运行共享向量、自检仿真和 200 MHz 综合检查：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_matlab_vectors.ps1
+powershell -ExecutionPolicy Bypass -File scripts/run_adc_frontend_xsim.ps1
+powershell -ExecutionPolicy Bypass -File scripts/run_adc_frontend_synth.ps1
+powershell -ExecutionPolicy Bypass -File scripts/run_g_fir_xsim.ps1
+powershell -ExecutionPolicy Bypass -File scripts/run_g_fir_synth.ps1
+powershell -ExecutionPolicy Bypass -File scripts/run_g_frame_xsim.ps1
+powershell -ExecutionPolicy Bypass -File scripts/run_g_frame_synth.ps1
+powershell -ExecutionPolicy Bypass -File scripts/run_g_fft_input_xsim.ps1
+powershell -ExecutionPolicy Bypass -File scripts/run_g_fft_input_synth.ps1
+powershell -ExecutionPolicy Bypass -File scripts/run_g_pipeline_xsim.ps1
+powershell -ExecutionPolicy Bypass -File scripts/run_g_pipeline_synth.ps1
+```
+
+整条“MATLAB 向量→位真 XSim→200 MHz 综合时序”可用一条命令复核：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_g_pipeline_closed_loop.ps1
+```
+
+当前正式参数集成结果为 1967 LUT、4255 FF、5 BRAM、18 DSP；5 ns 约束下
+WNS +1.002 ns、TNS 0。该结果是无板级 XDC 的纯 RTL 综合结果，不代表已经满足
+ADC 输入时序或可以生成 bitstream。
+
+在上述 XSim 脚本后增加 `-Gui` 可直接打开波形窗口。进入 Tcl Console 后执行
+`source scripts/wave_adc_frontend.tcl`、`source scripts/wave_g_fir.tcl` 或
+`source scripts/wave_g_frame.tcl`、`source scripts/wave_g_fft_input.tcl`；集成流水
+使用 `source scripts/wave_g_pipeline.tcl`。变量说明见
+`hardware/notes/waveform_guide.md`。

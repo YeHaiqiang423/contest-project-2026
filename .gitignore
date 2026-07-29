@@ -36,10 +36,11 @@ codegen/
 *.rpt
 vivado_pid*.str
 xsim.dir/
+tight_setup_hold_pins.txt
+tmp/
 
 # OS/editor local files
 .DS_Store
 Thumbs.db
 *.swp
 *~
-
