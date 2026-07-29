@@ -82,6 +82,10 @@ powershell -ExecutionPolicy Bypass -File scripts/run_synth.ps1
 - 任务 3：任务 2 信号叠加 200 mVpp、1 MHz 及以上单音干扰，显示结果仍应描述
   有用信号。
 
+赛题明确规定信号源输出阻抗和测试电缆特性阻抗均为 50 Ω，电缆两端为 BNC；
+本装置输入端按 50 Ω 系统进行匹配，板测时信号发生器的负载/匹配阻抗设置必须选
+`50 Ω`，不能选 `High-Z`。题目以信号发生器各参数设置值作为测量标称值。
+
 已确认 ADC 实物为 ADS6149（14 bit，按 200 MSPS 使用）；ADC 接口相关 FPGA
 I/O 供电为 3.3 V，且板级电压匹配已经实测。系统只需使用一路 ADC。显示采用
 陶晶驰串口屏，因此 HDMI 不在设计范围内；串口屏具体型号、波特率和 FPGA 引脚
@@ -141,6 +145,20 @@ powershell -ExecutionPolicy Bypass -File scripts/run_g_pipeline_closed_loop.ps1
 当前正式参数集成结果为 1967 LUT、4255 FF、5 BRAM、18 DSP；5 ns 约束下
 WNS +1.002 ns、TNS 0。该结果是无板级 XDC 的纯 RTL 综合结果，不代表已经满足
 ADC 输入时序或可以生成 bitstream。
+
+板级频谱闭环现已加入 Vivado FFT v9.1：4096 点、自然顺序、16 bit 定点块浮点，
+并实现 10--500 kHz 三峰搜索、Hann 三点小数-bin 频率估计，以及栅栏损失/块指数
+补偿后的 ADC 幅值码。10 kHz 下边界和 0.4-bin 幅值衰减已有自动回归覆盖。
+自检命令为：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_g_fft_spectrum_xsim.ps1
+powershell -ExecutionPolicy Bypass -File scripts/run_g_board_ila_build.ps1
+```
+
+当前板级实现资源为 5898 LUT、11420 FF、71 BRAM tile、23 DSP；200 MHz 最终
+WNS +0.184 ns、WHS +0.034 ns，DRC/CDC Critical 和未约束路径均为 0。新版 ILA
+操作与校准说明见 `hardware/notes/fft_spectrum_ila_test_guide.md`。
 
 在上述 XSim 脚本后增加 `-Gui` 可直接打开波形窗口。进入 Tcl Console 后执行
 `source scripts/wave_adc_frontend.tcl`、`source scripts/wave_g_fir.tcl` 或

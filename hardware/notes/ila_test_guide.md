@@ -1,5 +1,8 @@
 # ADS6149 到 Hann 输入流：ILA 初步板测指南
 
+> 本文对应“FFT 核接入前”的历史镜像。当前 FFT/频谱新版 bitstream、探针和测试
+> 方法请查看 `hardware/notes/fft_spectrum_ila_test_guide.md`，不要混用两版 `.ltx`。
+
 更新日期：2026-07-29  
 适用器件：Mizar Z7，`xc7z020clg400-2`，ADC0 直插 ADS6149 模块  
 Vivado：2020.2

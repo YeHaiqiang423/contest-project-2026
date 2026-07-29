@@ -9,10 +9,14 @@ $tcl = Join-Path $PSScriptRoot 'build_g_board_ila.tcl'
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 Push-Location $projectRoot
 try {
+    $savedErrorAction = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     & $vivado -mode batch -nolog -nojournal -source $tcl 2>&1 |
         Tee-Object -FilePath $buildLog
-    if ($LASTEXITCODE -ne 0) {
-        throw "Board ILA build failed with exit code $LASTEXITCODE"
+    $vivadoExitCode = $LASTEXITCODE
+    $ErrorActionPreference = $savedErrorAction
+    if ($vivadoExitCode -ne 0) {
+        throw "Board ILA build failed with exit code $vivadoExitCode"
     }
     if (-not (Select-String -LiteralPath $buildLog `
             -Pattern '^BOARD_ILA_BUILD_PASS:' -Quiet)) {

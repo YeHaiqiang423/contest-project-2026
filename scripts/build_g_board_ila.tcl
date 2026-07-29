@@ -17,21 +17,58 @@ add_files [list \
     [file join $project_root rtl src g_frame_capture.v] \
     [file join $project_root rtl src g_hann_rom.v] \
     [file join $project_root rtl src g_fft_input_stream.v] \
+    [file join $project_root rtl src g_integer_sqrt.v] \
+    [file join $project_root rtl src g_fractional_divider.v] \
+    [file join $project_root rtl src g_hann_amplitude_scaler.v] \
+    [file join $project_root rtl src g_hann_peak_refiner.v] \
+    [file join $project_root rtl src g_fft_core_wrapper.v] \
+    [file join $project_root rtl src g_spectrum_analyzer.v] \
     [file join $project_root rtl src g_processing_pipeline.v] \
     [file join $project_root rtl src g_board_ila_top.v]]
 add_files -fileset constrs_1 [file join $project_root rtl constraints g_board_ila.xdc]
 set_property top g_board_ila_top [current_fileset]
 
+create_ip -name xfft -vendor xilinx.com -library ip -module_name g_fft_4096_ip
+set_property -dict [list \
+    CONFIG.transform_length {4096} \
+    CONFIG.implementation_options {radix_2_lite_burst_io} \
+    CONFIG.input_width {16} \
+    CONFIG.phase_factor_width {16} \
+    CONFIG.scaling_options {block_floating_point} \
+    CONFIG.rounding_modes {convergent_rounding} \
+    CONFIG.throttle_scheme {nonrealtime} \
+    CONFIG.output_ordering {natural_order} \
+    CONFIG.xk_index {true} \
+    CONFIG.aresetn {true} \
+    CONFIG.target_clock_frequency {200}] [get_ips g_fft_4096_ip]
+generate_target all [get_ips g_fft_4096_ip]
+if {[llength [get_runs -quiet g_fft_4096_ip_synth_1]] == 0} {
+    create_ip_run [get_files g_fft_4096_ip.xci]
+}
+launch_runs g_fft_4096_ip_synth_1 -jobs 2
+wait_on_run g_fft_4096_ip_synth_1
+
 create_ip -name ila -vendor xilinx.com -library ip -module_name board_ila
 set_property -dict [list \
-    CONFIG.C_NUM_OF_PROBES {6} \
+    CONFIG.C_NUM_OF_PROBES {17} \
     CONFIG.C_PROBE0_WIDTH {14} \
-    CONFIG.C_PROBE1_WIDTH {14} \
+    CONFIG.C_PROBE1_WIDTH {16} \
     CONFIG.C_PROBE2_WIDTH {16} \
-    CONFIG.C_PROBE3_WIDTH {16} \
-    CONFIG.C_PROBE4_WIDTH {16} \
-    CONFIG.C_PROBE5_WIDTH {8} \
-    CONFIG.C_DATA_DEPTH {32768} \
+    CONFIG.C_PROBE3_WIDTH {32} \
+    CONFIG.C_PROBE4_WIDTH {33} \
+    CONFIG.C_PROBE5_WIDTH {12} \
+    CONFIG.C_PROBE6_WIDTH {12} \
+    CONFIG.C_PROBE7_WIDTH {12} \
+    CONFIG.C_PROBE8_WIDTH {12} \
+    CONFIG.C_PROBE9_WIDTH {16} \
+    CONFIG.C_PROBE10_WIDTH {16} \
+    CONFIG.C_PROBE11_WIDTH {16} \
+    CONFIG.C_PROBE12_WIDTH {20} \
+    CONFIG.C_PROBE13_WIDTH {16} \
+    CONFIG.C_PROBE14_WIDTH {16} \
+    CONFIG.C_PROBE15_WIDTH {8} \
+    CONFIG.C_PROBE16_WIDTH {5} \
+    CONFIG.C_DATA_DEPTH {8192} \
     CONFIG.C_INPUT_PIPE_STAGES {2} \
     CONFIG.C_ADV_TRIGGER {false} \
     CONFIG.C_EN_STRG_QUAL {1}] [get_ips board_ila]
@@ -120,6 +157,11 @@ puts $manifest "Board clock: 50 MHz"
 puts $manifest "ADC forward/system clock: 200 MHz"
 puts $manifest "ADC data/return clock IOSTANDARD: HSTL_II_18"
 puts $manifest "Bank 35 INTERNAL_VREF: 0.9 V"
+puts $manifest "FFT: 4096-point natural-order 16-bit block floating point"
+puts $manifest "FFT throttle scheme: Non-Realtime"
+puts $manifest "Spectrum band: bins 21..1024 (10 kHz..500 kHz at 2 MSPS)"
+puts $manifest "ILA depth: 8192 samples at 200 MHz"
+puts $manifest "ILA probes: 17, including separate peak bins/amplitudes and raw FFT events"
 puts $manifest "Setup slack: $setup_slack ns"
 puts $manifest "Hold slack: $hold_slack ns"
 puts $manifest "Unconstrained paths: $unconstrained_count"
