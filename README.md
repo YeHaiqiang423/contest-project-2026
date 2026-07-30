@@ -1,336 +1,428 @@
-# 电赛 FPGA 项目
+# 2026 电赛 G 题 FPGA 周期信号测量分析装置
 
-本仓库用于电赛期间的 MATLAB 算法建模、定点化、RTL 实现、XSim 仿真、Vivado 综合实现和板级验证。
+本仓库实现“周期信号测量分析装置”的 MATLAB 黄金模型、定点化、RTL、XSim 自检、Vivado 板级工程、ILA 验证和陶晶驰串口屏显示。本文按信号实际流经系统的顺序组织，重点回答三个问题：每一级为什么存在、做了什么数学处理，以及浮点算法怎样变成可在 Zynq-7020 上以 200 MHz 运行的硬件。
 
-## 当前硬件
+## 1. 题目、硬件与当前边界
 
-- 开发板：MicroPhase Mizar Z7，Zynq-7000 SoC
-- 目标器件：`xc7z020clg400-2`（以最终所用板卡丝印和工程设置为准）
-- PL 板载时钟：50 MHz，约束信号名 `PL_CLK_50M`；资料中的通用 XDC 也包含 `clk`/H16，使用前必须按顶层端口复核
-- ADC：Texas Instruments ADS6149（实物丝印已确认；本地数据手册覆盖 ADS6149/ADS6148 系列）
-- DAC：Texas Instruments DAC5688
-- DAC 配置参考：STM32F103 + HAL/SPI/USB CDC 例程
+题目要求在 2 s 内分析由基波和一至两个谐波组成的周期信号，显示一或三个完整周期、整体峰峰值、真有效值、基波频率、定性频谱和各分量峰值幅度。幅值绝对误差限为 5 mV，基波频率误差限为 1 kHz，频率分辨率要求 500 Hz。
 
-硬件手册、原理图、尺寸图、芯片数据手册和厂商参考工程保存在本地 `docs/`。该目录体积较大且含厂商资料，不纳入 Git。
+- 任务 1：整体 100～250 mVpp，各分量 10～200 kHz。
+- 任务 2：整体 50～250 mVpp，各分量 10～500 kHz。
+- 任务 3：在任务 2 信号上叠加 200 mVpp、1 MHz 及以上单音干扰，仍测量有用信号。
+- 输入、信号源和同轴电缆均按 50 Ω 系统使用。信号发生器必须选择 `50 Ω` 负载，题目以信号源设置值为标称值。
 
-## 参考资料注意事项
+当前硬件为 MicroPhase Mizar Z7（`xc7z020clg400-2`）、ADS6149 14 bit ADC 和 TJC8048X270_11 串口屏。板载参考时钟为 50 MHz，ADC 和系统高速逻辑按 200 MHz 工作。ADC 返回时钟和数据采用厂商例程对应的 `HSTL_II_18` 与 Bank 35 `INTERNAL_VREF=0.9 V`；W18/W19 串口引脚采用 `LVCMOS33`。不能因为普通 FPGA 控制信号为 3.3 V，就把 ADC 高速数据脚改成 `LVCMOS33`。
 
-- `docs/02_Mizar Z7硬件资料/` 包含 Mizar Z7 Rev.1.1 用户手册、原理图和 `Mizar_Z7_7Z020.xdc`。
-- `docs/高性能ADC_DAC模块资料/` 包含 ADS6148/DAC5688 数据手册、硬件设计、DAC 配置例程和 FPGA 回环工程。
-- FPGA 回环参考工程目标器件为 `xc7z020clg400-2`，但工程由 Vivado 2025.2 生成；本机使用 Vivado 2020.2。不要直接用 2020.2 覆盖或降级原工程，应从参考工程提取 RTL、XDC 和 IP 参数，在本项目中新建兼容工程并重新生成 IP。
-- 厂商 XDC 只能作为引脚来源，启用约束前必须核对板卡型号、顶层端口、电压和时钟频率。
+当前仍有两个必须记住的物理边界：
 
-## 目录
+1. 板上 ADC `CLKOUT` 位于 L20，工程使用了 `CLOCK_DEDICATED_ROUTE FALSE`。最终实现已过时序，但这不是理想的专用时钟布线。
+2. 目前没有正式的模拟抗混叠低通。数字滤波能抑制仍留在数字域中的 1 MHz 以上分量，却不能恢复第一次抽取时已经混叠进 0～500 kHz 的信息。任务 3 的最终可靠性仍依赖 50 Ω 输入、ADC 驱动和模拟低通。
 
-- `docs/`：本地硬件资料与厂商例程，不提交 Git
-- `matlab/model/`：浮点黄金模型
-- `matlab/fixed/`：定点化模型
-- `matlab/vectors/`：输入向量与黄金输出
-- `rtl/src/`：Verilog/SystemVerilog 可综合源码
-- `rtl/tb/`：自检 Testbench
-- `rtl/constraints/`：XDC、引脚和时钟约束
-- `scripts/`：仿真、综合和结果比对脚本
-- `logs/`：仿真、综合和时序日志
-- `results/`：波形、报告和测试结果
+硬件手册、原理图、ADS6149 数据手册和厂商参考工程位于 `docs/`，该目录不提交 Git。厂商工程由较新 Vivado 生成，只用于提取引脚、I/O 标准、接口结构和 IP 参数，不能直接由 Vivado 2020.2 覆盖保存。
 
-## VS Code、MATLAB 与 Vivado 共用源码
-
-1. 用 VS Code 打开本目录：`code G:\workspace\26DianSai\contest-project`。
-2. 安装官方扩展 `MathWorks.language-matlab`。项目设置已把 `MATLAB.installPath` 指向 `G:\Matlab`，并设为按需启动，避免打开 `.m` 文件时立即占用大量内存。
-3. 在 Vivado 中新建 2020.2 工程，把 `rtl/src/`、`rtl/tb/` 和 `rtl/constraints/` 中的文件以引用方式加入工程；不要选择复制源文件到工程目录。
-4. 日常编辑统一在 VS Code 完成。MATLAB 扩展负责运行和调试 `.m` 文件；Vivado/XSim 负责 HDL 仿真、综合、实现与下载。三者看到的是磁盘上的同一份文件。
-5. 不要同时在 VS Code、MATLAB Editor 和 Vivado Text Editor 中修改同一文件，以免最后保存的一方覆盖另一方。
-
-VS Code 已安装 Verilog HDL、TerosHDL 和 WaveTrace 等扩展；项目还会推荐 MathWorks 官方 MATLAB 扩展。
-
-## 本机工具
-
-- MATLAB R2024b (24.2)：`G:\Matlab`
-- Vivado/XSim 2020.2：`D:\XUni\Vivado\2020.2`
-- Git 2.47.1：`D:\Git`
-
-## 最小闭环示例：饱和增益
-
-示例实现 `y = saturate_int16(3*x)`，用于验证 MATLAB -> 文本向量 -> RTL/Testbench -> XSim -> Vivado 综合的完整链路，不依赖任何 IP。
-
-在项目根目录依次运行：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/run_matlab_vectors.ps1
-powershell -ExecutionPolicy Bypass -File scripts/run_xsim.ps1
-powershell -ExecutionPolicy Bypass -File scripts/run_synth.ps1
-```
-
-- MATLAB 生成 `matlab/vectors/sat_gain_input.txt` 和 `sat_gain_expected.txt`。
-- Testbench 自动读取并逐项比对，成功时输出 `PASS`。
-- 综合目标为 `xc7z020clg400-2`，仅执行综合，不做实现或 bitstream。
-- 日志写入 `logs/`，综合报告写入 `results/synth_sat_gain/`；它们默认不提交 Git。
-
-## GitHub
-
-计划托管到 [YeHaiqiang423](https://github.com/YeHaiqiang423) 账户。创建远程仓库前先确认仓库名称和可见性；`docs/` 已由 `.gitignore` 整体排除。
-
-## 赛题目标与已确认硬件
-
-本仓库面向 2026 年 G 题“周期信号测量分析装置”。输入由基波和一至两个
-谐波组成，每项测量须在 2 s 内完成，并显示一或三个完整周期、峰峰值、真有效值、
-基波频率、定性频谱和各分量峰值幅度。电压/幅度绝对误差限为 5 mV，基波频率
-误差限为 1 kHz，频率分辨率要求 500 Hz。
-
-- 任务 1：100--250 mVpp，各分量 10--200 kHz。
-- 任务 2：50--250 mVpp，各分量 10--500 kHz。
-- 任务 3：任务 2 信号叠加 200 mVpp、1 MHz 及以上单音干扰，显示结果仍应描述
-  有用信号。
-
-赛题明确规定信号源输出阻抗和测试电缆特性阻抗均为 50 Ω，电缆两端为 BNC；
-本装置输入端按 50 Ω 系统进行匹配，板测时信号发生器的负载/匹配阻抗设置必须选
-`50 Ω`，不能选 `High-Z`。题目以信号发生器各参数设置值作为测量标称值。
-
-已确认 ADC 实物为 ADS6149（14 bit，按 200 MSPS 使用）；ADC 接口相关 FPGA
-I/O 供电为 3.3 V，且板级电压匹配已经实测。系统只需使用一路 ADC。显示采用
-陶晶驰串口屏，因此 HDMI 不在设计范围内；串口屏具体型号、波特率和 FPGA 引脚
-待接线确定后再固化。ADC 数据脚仍应按 ADC 实际输出模式和参考设计选取 I/O
-标准，Bank 为 3.3 V 并不等于这些数据脚应直接约束为 `LVCMOS33`。
-
-## 测量架构
+## 2. 从 MATLAB 到上板的完整工作流
 
 ```text
-BNC/50 ohm -> 模拟抗混叠/抑制干扰低通 -> ADA4937 -> ADS6149
-           -> 200 MSPS 采集 -> /10 -> 20 MSPS 数字低通
-           -> 波形/Upp/RMS 分支
-           -> /10 -> 2 MSPS、4096 点频谱分析
-           -> UART 数值与波形数据包
+赛题指标与测试用例
+    ↓
+MATLAB 浮点黄金模型：验证算法是否有能力达标
+    ↓
+MATLAB 定点分析：确定 FIR、Hann、位宽、舍入和参考向量
+    ↓
+RTL：按 200 MHz 时序、BRAM/DSP 资源和 valid/ready 协议实现
+    ↓
+XSim：读取 MATLAB 向量，逐拍比较，形成可重复的自检闭环
+    ↓
+Vivado 综合/实现：检查资源、时序、DRC、CDC 与实际 XDC
+    ↓
+bit/ltx + Hardware Manager/ILA：用真实 ADC、50 Ω 信号源验证
+    ↓
+现场单音校准 → UART 数值和 800 点图形 → 串口屏
 ```
 
-2 MSPS 下 4096 点变换的频率间隔为 488.28125 Hz。当前板级 RTL 用 Hann 三点
-插值估计亚 bin 频率和恢复峰值幅度；正弦/余弦最小二乘拟合是后续可选的进一步
-精修手段，不是当前 ILA 结果的来源。`Urms` 根据谐波幅度计算，`Upp` 在稠密重建
-的一个基波周期上求取。任务 3 必须同时依赖模拟和数字滤波：
-模拟低通应通过 500 kHz，并从 1 MHz 起提供足够衰减，避免任意高频干扰在首次
-抽取时混叠进有用带宽。当前数字模型明确假设此前端条件成立。
+这个顺序很重要。MATLAB 解决“数学方法是否成立”；位真向量解决“定点和 RTL 是否等价”；XSim 解决“协议和边界是否正确”；时序报告解决“电路是否跑得动”；ILA 才解决“真实引脚、时钟、ADC 码制和模拟链路是否正确”。只看一张看似平滑的 ILA 正弦波，不能替代前面几层验证。
 
-运行浮点黄金模型回归：
+## 3. MATLAB 阶段具体做了什么
+
+### 3.1 浮点黄金模型
+
+`matlab/model/g_measurement_model.m` 是算法参考。它依次执行：
+
+1. 200 MSPS 数据每 10 点取 1 点，得到 20 MSPS；
+2. 设计并应用 255 tap、750 kHz 截止的 Kaiser 窗低通；
+3. 再每 10 点取 1 点，得到 2 MSPS；
+4. 取 4096 点、去均值、乘 Hann 窗并做 FFT；
+5. 在 10～500 kHz 内搜索最多三个局部峰；
+6. 用三点对数抛物线插值得到亚 bin 频率；
+7. 在这些频率上建立正弦/余弦矩阵，以最小二乘法同时拟合各分量幅值和相位；
+8. 除以 FIR 在对应频率处的复频响，补偿数字滤波幅频响应；
+9. 根据拟合出的多音信号计算整体 Vpp、真 RMS、单周期和三周期波形。
+
+若检测到频率为 `f_i` 的若干分量，模型建立
+
+```text
+x[n] ≈ c + Σ(a_i cos(2πf_i n/Fs) + b_i sin(2πf_i n/Fs))
+```
+
+用最小二乘求解系数后，单个分量的峰值和相位为
+
+```text
+A_i = sqrt(a_i²+b_i²)
+phi_i = atan2(-b_i, a_i)
+```
+
+它比只读取一个 FFT bin 更接近“计量算法”，也能处理不同初相位；代价是矩阵求解不适合直接照搬到当前 FPGA。RTL 因而使用更便宜的 Hann 三点插值和幅值补偿。换言之，MATLAB 是精度上限和交叉检查工具，不是 RTL 的逐语句翻译。
+
+`matlab/model/run_g_model_regression.m` 构造覆盖三项任务的确定性测试：不同基频、谐波阶次、初相位、50～250 mVpp 输入，以及 1 MHz、1.37 MHz、5 MHz 干扰；还加入直流偏置、14 bit/2 Vpp ADC 量化和小量噪声。每例自动检查分量数、频率、各分量幅值、整体 Vpp 和 RMS 是否落入题目误差预算，结果写入 `results/g_model_regression.csv`。
+
+### 3.2 FIR 设计与定点化
+
+`g_design_lowpass.m` 用窗函数法设计理想低通。对奇数长度 `N=255`，中心位置为 127：
+
+```text
+h_ideal[n] = 2fc/Fs · sinc(2fc/Fs · (n-127))
+h[n]       = h_ideal[n] · Kaiser(n, beta)
+h[n]       = h[n] / Σh[n]
+```
+
+当前参数为 `Fs=20 MHz`、`fc=750 kHz`、`beta=7.86`。`analyze_g_fixed_fir.m` 将系数量化为 signed Q1.17，并修正中心抽头，使整数系数之和严格等于 `2^17`，因此直流增益严格为 1。它还验证对称性、累加器位宽与频响：
+
+| 项目 | 当前结果 |
+|---|---:|
+| 通带 0～500 kHz 波纹 | 0.001954 dB |
+| 500 kHz 增益 | -0.001011 dB |
+| 1 MHz 起最差阻带 | -76.718 dB |
+| 所需累加器 | 32 bit |
+| 量化后对称误差 | 0 LSB |
+
+截止频率选在 750 kHz，是在“500 kHz 内尽量平坦”和“1 MHz 起快速衰减”之间留过渡带。它不等于允许先把 200 MSPS 无滤波抽到 20 MSPS：第一次 `/10` 之前的模拟抗混叠责任仍存在。
+
+### 3.3 MATLAB 如何成为 RTL 的裁判
+
+MATLAB 不只画图，还生成可被 Testbench 读取的位真文件：
+
+- `generate_adc_frontend_vectors.m`：ADC 二补码/偏移二进制与抽取边界；
+- `generate_g_fir_vectors.m`：Q1.17 FIR 逐点期望值；
+- `generate_g_frame_vectors.m`：第二级抽取和帧边界；
+- `generate_g_hann_vectors.m`：4096 点 Hann 的前半 ROM，以及小规模逐点乘法期望值；
+- `generate_g_pipeline_vectors.m`：ADC 码到 FFT 输入前的端到端期望值；
+- `generate_g_fft_spectrum_vectors.m`：500 kHz、三音、10 kHz、13 kHz 和 300 kHz 五帧频谱测试。
+
+例如 Hann 定点乘法不是笼统的“乘 0.5”，而是明确规定：
+
+```text
+w_q15[n] = round(w[n]·32767)
+y[n]     = floor((x[n]·w_q15[n] + 2^14)/2^15)
+```
+
+MATLAB 与 RTL 使用同一舍入规则，Testbench 才能逐 bit 比较，而不是容忍“看起来差不多”。
+
+## 4. FPGA 中信号逐级经历了什么
+
+板级顶层为 `g_board_ila_top.v`，主要模块关系如下。表中的速率是“有效样本率”，各模块本身都处于 200 MHz 系统时钟域，只有 ADC 输入 IOB/FIFO 写端位于 ADC 返回时钟域。
+
+| 数据阶段 | 主要模块 | 输入/输出 | 主要职责 |
+|---|---|---|---|
+| 板级时钟与 CDC | `g_board_ila_top.v` + XPM FIFO | ADC 200 MSPS → 系统域 | IOB 采样、异步跨域、错误状态同步 |
+| 采样前端 | `adc_sample_frontend.v` | 200 → 20 MSPS | 码制归一化、第一次 `/10` |
+| 数字低通 | `g_symmetric_fir.v` | 20 → 20 MSPS | 255 tap Q1.17 FIR |
+| 频谱帧 | `g_frame_capture.v` | 20 → 2 MSPS | 第二次 `/10`、4096 点 ping-pong 缓存 |
+| FFT 输入 | `g_fft_input_stream.v` | 4096 点帧 | Q1.15 Hann、AXI Stream 握手 |
+| 频域变换 | `g_fft_core_wrapper.v` | 实数时域 → 复数频域 | Vivado FFT 配置、bin 与 block exponent |
+| 参数提取 | `g_spectrum_analyzer.v` | 复数 bin → 三个分量 | 功率、峰搜索、频率插值、幅值补偿 |
+| 物理量换算 | `g_measurement_calibrator.v` | code → μV/Hz | 校准、频率排序、Um 与真 RMS |
+| 时域显示 | `g_time_domain_display.v` | 20 MSPS FIR 流 → 800 点 | 环形缓存、整体 Vpp、一/三周期图 |
+| 频谱显示 | `g_spectrum_display.v` | 0～500 kHz 功率 → 800 点 | max-pooling、开方、归一化 |
+| 人机接口 | `g_tjc_display_uart.v` | 物理量/图 → UART | 按键、消抖、BCD、透明传图与快照 |
+
+### 4.1 ADC 采集、码制和跨时钟域
+
+```text
+ADS6149 14 bit / 200 MSPS
+    → 输入 IOB 寄存
+    → 按配置解释为二补码或 offset binary
+    → ADC 返回时钟域异步 FIFO
+    → 200 MHz 系统时钟域
+```
+
+`adc_sample_frontend.v` 将 ADC 原始码统一成 signed 二补码。若 ADC 输出是 offset binary，则只需翻转 MSB；当前板级配置 `ADC_OFFSET_BINARY=0`，表示直接按二补码解释。之后每 10 个有效样本输出一个，数据率由 200 MSPS 降为 20 MSPS。
+
+异步 FIFO 不是为了滤波，而是隔离 ADC 返回时钟与 FPGA 系统 200 MHz 时钟的相位关系。写指针和读指针经过 CDC 同步，读取端等待约 16 点预填充，吸收指针同步延迟，避免输出 valid 周期性断裂。调试时应以 `valid` 判断数据是否有效，不能因为数据寄存器数值稳定就推断通路停止。
+
+### 4.2 255 tap 对称 FIR：为什么只用 13 个乘法通道
+
+普通 FIR 为
+
+```text
+y[n] = Σ(k=0..254) h[k]x[n-k]
+```
+
+线性相位系数满足 `h[k]=h[254-k]`，所以可以改写为
+
+```text
+y[n] = Σ(k=0..126) h[k](x[n-k]+x[n-254+k]) + h[127]x[n-127]
+```
+
+独立乘法从 255 次降为 128 次。输入有效率是 20 MSPS，而计算时钟是 200 MHz，每个输入样本之间恰有 10 个系统周期；`g_symmetric_fir.v` 使用 13 条 DSP 乘法 lane，分 10 个 phase 完成 `13×10=130` 个位置，覆盖 128 个唯一抽头。这样没有堆出 128 个并行乘法器，同时又能持续接收 20 MSPS。
+
+每级乘积先进入寄存器，再用多级加法树汇总，最后对 Q1.17 结果对称舍入并饱和到 16 bit。核心工程思想是利用“数据率比时钟慢 10 倍”的时间预算换资源，而不是为了省 DSP 把 128 项塞进一个超长组合路径。
+
+### 4.3 第二次抽取与 ping-pong 帧缓存
+
+`g_frame_capture.v` 对 FIR 输出再 `/10`，形成 2 MSPS、4096 点帧：
+
+```text
+帧时长 = 4096 / 2,000,000 = 2.048 ms
+```
+
+帧缓存使用 ping-pong 双 BRAM：一块继续采下一帧，另一块供 FFT 读取。FFT 的 AXI Stream 可能因内部处理拉低 `ready`，双缓存可将连续采样与突发读帧解耦；处理完成后通过 release 握手归还 bank。若只有单 RAM，采样写入与 FFT 读取会争用端口，背压还可能破坏固定采样间隔。
+
+### 4.4 Hann 加窗与 FFT
+
+4096 点对称 Hann 为
+
+```text
+w[n] = 0.5 - 0.5cos(2πn/(N-1)),  N=4096
+```
+
+左右对称使 FPGA 只保存前 2048 个 Q1.15 系数，后半窗镜像寻址，ROM 减半。`g_fft_input_stream.v` 把帧样本乘窗、舍入，然后通过 valid/ready/last 送给 Vivado FFT v9.1。FFT 参数为 4096 点、自然顺序、16 bit 定点、block floating point、Non-Realtime。
+
+Hann 窗降低非整周期截断造成的旁瓣泄漏，但一定会衰减幅值。“无衰减加窗”的工程含义不是窗本身无损，而是窗后按已知增益恢复。若峰恰在 bin 中心：
+
+```text
+Mcenter ≈ A · N · CG / 2 · 2^(-B)
+CG = Σw[n]/N ≈ 0.499878
+N·CG/2 = 1023.75 ≈ 2^10
+Acenter ≈ Mcenter · 2^(B-10)
+```
+
+`B` 是 FFT block exponent。`g_hann_amplitude_scaler.v` 每拍移一位来恢复指数，避免 200 MHz 路径上出现宽桶形移位器。用 1024 近似 1023.75 的固定误差约 0.0244%，最终可由整机校准吸收。
+
+### 4.5 bin、峰值搜索和亚 bin 频率
+
+FFT 的 bin 是离散频率格点编号：
+
+```text
+Δf = Fs/N = 2,000,000/4096 = 488.28125 Hz
+f[k] = k·Δf
+```
+
+例如 50 kHz 对应 `k=102.4`，所以整数最大点通常是 bin 102，但真实频率不等于 `102×488.28125`。`g_spectrum_analyzer.v` 先在 bin 20～1024（约 10～500 kHz）内计算
+
+```text
+P[k] = Re[k]² + Im[k]²
+```
+
+并寻找局部极大值。三峰最初按功率由强到弱保存；低于最强峰功率 `1/2048` 的候选不计入 `component_count`，相当于幅值约低于最强峰 2.21%。校准模块随后把有效分量按频率升序排列，因此屏幕 `x2/x3` 总是最低频分量，而不是最强分量。
+
+对峰点左、中、右幅度
+
+```text
+L=sqrt(P[k-1]), C=sqrt(P[k]), R=sqrt(P[k+1])
+```
+
+RTL 估计 Hann 主瓣中的小数偏移：
+
+```text
+delta = 2(R-L)/(L+2C+R),  -0.5 ≤ delta ≤ 0.5
+f_est = (k+delta)Fs/N
+```
+
+`delta` 用 signed Q1.15。由于 `488.28125=15625/32`，硬件可写成
+
+```text
+frequency_hz = round(((k+delta)_q15 · 15625)/2^20)
+```
+
+Q15 运算步进约 0.0149 Hz，但这只是数字表示分辨率，不代表测量准确度。真实误差还来自采样时钟、噪声、相邻主瓣、量化和模拟频响。10 kHz 位于 bin 20.48，搜索必须从 bin 20 而非 21 开始；这正是早期 10 kHz 被误判约 16.7 kHz 的根因之一。
+
+### 4.6 非整数 bin 的幅值为什么还能稳定
+
+非整数 bin 会产生 scalloping loss。以 300 kHz 为例，它位于 bin 614.4，只读 bin 614 时 Hann 峰值约只剩 0.9008，即约 -0.91 dB。项目用同一个 `delta` 做偶次多项式修正：
+
+```text
+Hcorr(delta) ≈ 1 + 0.64744225delta² + 0.25902453delta⁴
+Ccorrected   = C·Hcorr(delta)
+```
+
+两个系数量化为 Q16 的 `42431` 和 `16975`，拟合范围 `[-0.5,0.5]` 内最坏误差约低于 0.03%。之后再恢复 block exponent 和 Hann 相干增益，得到正弦峰值 `amplitude_code`。这解释了扫频时同一输入幅值的 code 基本不随 bin 位置变化。
+
+当前 XSim 五帧自检结果包括：500 kHz/800 code、三音 1000/300/120 code、10 kHz/700 code、13 kHz/650 code、300 kHz/900 code，频率和幅值均回到期望整数值。
+
+### 4.7 电压校准、分量 Um 与真 RMS
+
+FFT 输出仍是 ADC 幅值码。`g_measurement_calibrator.v` 保存 unsigned Q16.16 的增益
+
+```text
+G = 微伏/幅值码
+U_i(μV, peak) = round(amplitude_code_i · G)
+```
+
+屏幕按题目定义显示各分量峰值 `Um`，不是 Vpp。单个正弦有
+
+```text
+Vpp_i = 2U_i
+Vrms_i = U_i/sqrt(2)
+```
+
+现场校准按钮发送 ASCII `C` (`0x43`)。系统要求输入 100 kHz、200 mVpp 单音，验证仅有一个分量且频率在 99～101 kHz，连续平均 16 帧后计算
+
+```text
+Uref = Vpp_ref/2 = 100000 μV
+G_q16 = round((Uref << 16)/average_code)
+```
+
+平均 16 帧降低短期噪声，单音和频率检查避免误用多音完成标定。当前校准掉电后不保存，但赛场可重新一键校准；若以后需要掉电保持，可通过 `gain_write_q16` 从 Flash/UART 恢复。
+
+不同频率的正弦在整数个基波周期上互相正交，因此零直流条件下总真有效值为
+
+```text
+Vrms_total = sqrt(Σ U_i²/2)
+```
+
+该结果与各分量初相位无关。RTL 先对幅值码平方、求和、除 2、做整数平方根，最后统一乘增益；分量 RMS 则乘 Q16 常数 `1/sqrt(2)=46341/65536`。
+
+整体 Vpp 不满足 `2ΣU_i`，因为各谐波峰值一般不同时出现，而且它取决于相位。RTL 的 `g_time_domain_display.v` 保存 8192 点 20 MSPS FIR 输出，在最近三个基波周期中直接求 `max-min`，再乘校准增益。这样无需恢复每个分量相位，也能测真实合成波峰峰值。
+
+一个实测例子很能说明区别。信号源设置基波/2 次/4 次谐波 Vpp 为 50/200/250 mV，屏幕得到 `Um=25/101/126 mV`，则
+
+```text
+Vrms = sqrt((25²+101²+126²)/2) = 115.55 mV ≈ 116 mV
+u(t) = 25sin(wt)+101sin(2wt)+126sin(4wt) mV
+max(u)-min(u) = 425.88 mV ≈ 426 mV
+```
+
+所以当时显示的 426 mVpp 和 116 mVrms 与三个分量完全自洽；不能用 `2×(25+101+126)=504 mV` 判断整体 Vpp 错误。
+
+### 4.8 一周期/三周期波形与定性频谱
+
+时域显示根据最低频分量计算
+
+```text
+period_samples = round(20 MHz/f0)
+```
+
+从环形 BRAM 快照中选取一或三个周期，以 Q16 地址步长重采样为 800 点，再按本次扫描的 min/max 归一化到 0～255。它是定性波形，纵轴自动铺满，不可从图高直接读取 mV；数值应看 `x0..x7`。
+
+频谱显示将正频率 bin 0～1024 映射到 800 列。同一列落入多个 bin 时取最大功率，再开平方变回与电压幅值成正比的量，最后相对全谱最大值归一化到 0～255。若直接显示功率，较小谐波会按幅值平方被压得过低。
+
+## 5. 串口屏协议与交互
+
+TJC8048X270_11 使用 115200、8-N-1：FPGA TX=W18，RX=W19。R19/PL KEY1 低有效，经过 20 ms 消抖，每次按下只发送一次完整页面，不做周期刷新。
+
+| 控件 | FPGA 发送值 | 屏幕显示 |
+|---|---|---|
+| `x0` | 整体 Vpp，四舍五入为整数 mV | mV |
+| `x1` | 整体真 RMS，四舍五入为整数 mV | mV |
+| `x2` / `x3` | 最低频分量 Um / 频率 | mV / kHz（三位小数） |
+| `x4` / `x5` | 第二分量 Um / 频率 | mV / kHz（三位小数） |
+| `x6` / `x7` | 第三分量 Um / 频率 | mV / kHz（三位小数） |
+| `s0` | 800 个 8 bit 点 | 800×256 定性图 |
+
+频率直接发送整数 Hz，例如 12345 在屏上按缩放显示 12.345 kHz。按钮返回 ASCII：`C=0x43` 校准、`1=0x31` 单周期、`3=0x33` 三周期、`S=0x53` 频谱。
+
+图形先发送 `addt s0.id,0,800` 和三个 `0xFF`，收到屏幕 `0xFE` 后发送 800 个原始字节，等待 `0xFD` 完成。发送前先把显示 RAM 复制到快照 BRAM，防止 UART 慢速传输期间后台更新造成画面前后半帧不一致。
+
+## 6. 工程实现中最值得复盘的优化
+
+### 6.1 用流水线换时序
+
+200 MHz 只有 5 ns。实际遇到过的关键路径不是 FFT，而是“BRAM 读出→比较/减法→乘 255→除法”和峰值排序/换算。处理方法是把读取、比较、减法、乘法、除法启动和结果提交拆成多个寄存状态；三元素频率排序也拆成三个 compare/swap 周期。吞吐要求并不高的控制计算没有必要一拍完成。
+
+整数平方根和除法器采用逐位迭代，每拍决定一位。它们延迟几十拍，但一帧要 2.048 ms，几十到几百纳秒几乎没有系统影响，却避免了巨大组合除法器。
+
+### 6.2 让综合器真正推断 BRAM/DSP
+
+一次频谱显示初版允许同周期写两个地址，Vivado 无法推断单/双口 BRAM，把 `800×33` 存储展开成触发器和大多路器，资源曾膨胀到约 14 万 LUT。当前设计把最后一列的 flush 单独放到下一拍，保证每拍最多一次写入，最终重新推断为 BRAM。
+
+类似地，乘法前后显式寄存并使用合适位宽，帮助乘法吸收到 DSP48。Hann ROM 利用对称性减半；FIR 利用系数对称和 10 倍时分复用；FFT 帧用 BRAM 而不是寄存器阵列。这些优化都来自数据结构和速率关系，而不只是综合选项。
+
+### 6.3 控制扇出、快照和错误可见性
+
+- 高扇出 reset/enable 使用局部寄存副本和层次化控制，减少布线压力。
+- 测量结果先锁存，再启动 BCD 和 UART；图形先快照，避免撕裂。
+- 跨模块使用 `valid/ready/done/busy`，不靠固定延迟猜结果时间。
+- overrun、FFT protocol error、UART framing error、transparent timeout 等错误采用 sticky 标志，瞬时故障不会在 ILA 中一闪而过。
+- ILA 只保留 Vpp/RMS、前两分量和紧凑 health/control 共 7 个 probe、深度 2048，避免调试核消耗过多 BRAM与路由。
+
+最终正式镜像为 8151 LUT、13325 FF、24 BRAM tile、39 DSP；200 MHz 建立裕量 `+0.003 ns`、保持裕量 `+0.034 ns`，无未约束内部路径。建立裕量非常窄，任何 RTL、ILA、IP 或 XDC 改动后都必须完整重新实现，不能沿用旧 bitstream 的时序结论。
+
+## 7. 验证闭环与常用命令
+
+生成 MATLAB 模型结果和所有共享向量：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/run_g_model_regression.ps1
 powershell -ExecutionPolicy Bypass -File scripts/run_g_fixed_fir_analysis.ps1
+powershell -ExecutionPolicy Bypass -File scripts/run_matlab_vectors.ps1
 ```
 
-回归会生成确定性的三项任务波形，模拟 14 bit/2 Vpp ADC 量化，逐项检查题目
-数值误差门槛，并把 CSV 与日志分别写入 `results/` 和 `logs/`。
-
-首个正式 RTL 为 `rtl/src/adc_sample_frontend.v`，负责 ADS6149 二补码/偏移二进制
-归一化和 200→20 MSPS 抽取。`rtl/src/g_symmetric_fir.v` 是 255 tap、Q1.17、
-13 路时分乘法的 20 MSPS 数字低通。运行共享向量、自检仿真和 200 MHz 综合检查：
+逐模块自检：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/run_matlab_vectors.ps1
 powershell -ExecutionPolicy Bypass -File scripts/run_adc_frontend_xsim.ps1
-powershell -ExecutionPolicy Bypass -File scripts/run_adc_frontend_synth.ps1
 powershell -ExecutionPolicy Bypass -File scripts/run_g_fir_xsim.ps1
-powershell -ExecutionPolicy Bypass -File scripts/run_g_fir_synth.ps1
 powershell -ExecutionPolicy Bypass -File scripts/run_g_frame_xsim.ps1
-powershell -ExecutionPolicy Bypass -File scripts/run_g_frame_synth.ps1
 powershell -ExecutionPolicy Bypass -File scripts/run_g_fft_input_xsim.ps1
-powershell -ExecutionPolicy Bypass -File scripts/run_g_fft_input_synth.ps1
-powershell -ExecutionPolicy Bypass -File scripts/run_g_pipeline_xsim.ps1
-powershell -ExecutionPolicy Bypass -File scripts/run_g_pipeline_synth.ps1
+powershell -ExecutionPolicy Bypass -File scripts/run_g_fft_spectrum_xsim.ps1
+powershell -ExecutionPolicy Bypass -File scripts/run_g_measurement_calibrator_xsim.ps1
+powershell -ExecutionPolicy Bypass -File scripts/run_g_display_builders_xsim.ps1
+powershell -ExecutionPolicy Bypass -File scripts/run_g_tjc_display_uart_xsim.ps1
 ```
 
-整条“MATLAB 向量→位真 XSim→200 MHz 综合时序”可用一条命令复核：
+ADC→FIR→帧→Hann 的端到端位真闭环：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/run_g_pipeline_closed_loop.ps1
 ```
 
-当前正式参数集成结果为 1967 LUT、4255 FF、5 BRAM、18 DSP；5 ns 约束下
-WNS +1.002 ns、TNS 0。该结果是无板级 XDC 的纯 RTL 综合结果，不代表已经满足
-ADC 输入时序或可以生成 bitstream。
-
-板级频谱闭环现已加入 Vivado FFT v9.1：4096 点、自然顺序、16 bit 定点块浮点，
-并实现 10--500 kHz 三峰搜索、Hann 三点小数-bin 频率估计，以及栅栏损失/块指数
-补偿后的 ADC 幅值码。10 kHz 下边界和 0.4-bin 幅值衰减已有自动回归覆盖。
-
-### Hann 加窗后如何恢复幅值
-
-“FFT 无衰减加窗”不是指存在一种既抑制泄漏、又完全不改变幅值的窗。Hann 窗
-必然带来两种确定性损失：约 0.5 的相干增益，以及信号不落在整数 bin 中心时的
-栅栏损失。本工程先加窗降低频谱泄漏，再在 FFT 后把这两种损失分别补回来，因而
-最终输出接近加窗前的正弦峰值 ADC code。
-
-4096 点对称 Hann 窗定义为：
-
-```text
-w[n] = 0.5 - 0.5*cos(2*pi*n/(N-1)),  n = 0...N-1, N = 4096
-```
-
-MATLAB 把 `w[n]` 量化为 Q1.15：`round(w[n]*32767)`。由于窗左右对称，FPGA
-只在 BRAM 中保存前 2048 个系数，后半窗通过地址镜像读取。每个 16 bit 样本与
-16 bit 窗系数相乘，经对称舍入右移 15 bit 后送入 FFT：
-
-```text
-xw[n] = round(x[n] * w_q15[n] / 2^15)
-```
-
-对实正弦峰值 `A`，若频率恰好落在 bin 中心，则单边 FFT 峰值幅度近似为：
-
-```text
-Mcenter ~= A * N * CG / 2 * 2^(-B)
-CG = sum(w[n])/N ~= 0.499878
-```
-
-其中 `B` 是 Vivado FFT 块浮点输出的 `block_exponent`。本窗满足
-`N*CG/2 = 1023.75`，非常接近 `2^10=1024`，所以 RTL 用以下移位恢复 ADC
-峰值码：
-
-```text
-Acenter ~= Mcenter * 2^(B-10)
-```
-
-`g_hann_amplitude_scaler.v` 每拍只移动一位，以避免在 200 MHz 路径上生成可变
-桶形移位器。用 1024 近似 1023.75 只产生约 0.0244% 的固定比例误差；最终的
-模拟前端增益、ADC 满量程和该微小残差统一由电压校准系数吸收。
-
-仅补相干增益仍不够。频率偏离 bin 中心时，Hann 主瓣能量会分散到相邻点。例如
-300 kHz 在本系统中位于 bin 614.4；只读取 bin 614 会保留约 0.9008 的幅值，
-即约 `-0.91 dB`。RTL 因此保存峰值左、中、右三个功率，先计算幅度：
-
-```text
-L = sqrt(P[k-1]), C = sqrt(P[k]), R = sqrt(P[k+1])
-```
-
-然后用同一组三点估算峰值相对整数 bin 的偏移 `delta`：
-
-```text
-delta = 2*(R-L)/(L+2*C+R),  -0.5 <= delta <= 0.5
-```
-
-`delta` 使用 signed Q1.15。针对本项目的 4096 点对称 Hann 窗，离线拟合得到
-栅栏损失倒数的偶次多项式：
-
-```text
-Hcorr(delta) ~= 1 + 0.64744225*delta^2 + 0.25902453*delta^4
-```
-
-RTL 将两个系数量化为 Q16 的 `42431` 和 `16975`，先计算
-`Ccorrected=C*Hcorr(delta)`，再执行块指数/相干增益恢复。该多项式在
-`delta=-0.5...+0.5` 范围内对本窗的拟合最坏误差低于约 0.03%；它补偿的是
-FFT 栅栏损失，不代替整机的 mV/code 标定和模拟频响校准。
-
-因此幅值路径可以概括为：
-
-```text
-ADC code -> Q15 Hann -> block-floating FFT -> |X[k-1:k+1]|
-         -> 三点栅栏损失修正 -> 还原 block exponent
-         -> 补偿 Hann 相干增益 -> 正弦峰值 amplitude_code
-```
-
-### 亚 bin 频率为什么能精确到整数 Hz
-
-整数 FFT bin 只负责粗定位。2 MSPS、4096 点条件下：
-
-```text
-delta_f = Fs/N = 2,000,000/4096 = 488.28125 Hz
-f_bin(k) = k*488.28125 Hz
-```
-
-例如 50 kHz 位于 bin 102.4。频谱搜索先找到整数峰 `k=102`，再使用上面的 Hann
-三点公式得到约 `delta=+0.4`，最终频率为：
-
-```text
-f_est = (k+delta)*Fs/N
-```
-
-为了避免浮点运算，RTL 把 `k+delta` 保存为 Q15，并利用
-`488.28125=15625/32` 做精确的定点换算：
-
-```text
-frequency_hz = round(((k+delta)_q15 * 15625) / 2^20)
-```
-
-Q1.15 偏移本身对应约 `488.28125/32768=0.0149 Hz` 的数值步进，输出寄存器
-最终舍入为整数 Hz。这里的 0.0149 Hz 只是定点计算分辨率，不代表整机绝对误差
-达到 0.0149 Hz；真实准确度还受 2 MHz 采样时钟误差、噪声、量化、多音主瓣
-叠加和模拟前端影响。题目要求为 1 kHz，当前算法给这些误差留下了充足裕量。
-
-10 kHz 是一个特别的下边界：`10000/488.28125=20.48`，最大整数谱点可能是
-bin 20。搜索若从 bin 21 开始，会丢掉真正主峰并误选旁瓣，所以当前搜索范围从
-bin 20 开始，而最终测量带仍按插值频率判定为 10--500 kHz。
-
-三峰寄存器按功率从强到弱排序，并不按频率排序。峰值功率低于最强峰的
-`1/2048` 时不计入 `component_count`，对应幅值门限约 2.21%。单音测试中
-`peak1/peak2_bin` 仍可能保留噪声局部峰；只有 `component_count` 指示的前若干
-个峰及其幅值才有效。`fundamental_frequency_hz` 取所有合格分量中频率最低者。
-
-### 精度验证与源码对应关系
-
-自动回归包含五个完整 4096 点帧：500 kHz 单音、三音组合、10 kHz 下边界、
-13 kHz 单音和偏离整数 bin 0.4 格的 300 kHz 单音。当前 XSim 结果为：
-
-| 输入 | 期望峰值 code | RTL 频率 | RTL 峰值 code |
-|---|---:|---:|---:|
-| 500 kHz 单音 | 800 | 500000 Hz | 800 |
-| 100.098/250/450.195 kHz 三音 | 1000/300/120 | 100098 Hz（基波） | 1000/300/120 |
-| 10 kHz 单音 | 700 | 10000 Hz | 700 |
-| 13 kHz 单音 | 650 | 13000 Hz | 650 |
-| 300 kHz、偏移 0.4 bin | 900 | 300000 Hz | 900 |
-
-板测 50 kHz、400 mVpp 得到 `peak0_bin=102`、插值频率 50000 Hz、幅值约
-6330 code；全频域扫频时幅值波动约在 +/-100 code 内。绝对电压仍应以 ADC
-BNC 端实测 Vpp 建立 `mV/code`，并在需要时用 `K(f)` 表补偿模拟前端频响。
-
-主要实现文件如下：
-
-- `g_fft_input_stream.v`、`g_hann_rom.v`：Q15 对称 Hann 加窗；
-- `g_spectrum_analyzer.v`：功率、局部峰、三峰排序、门限和结果调度；
-- `g_integer_sqrt.v`、`g_fractional_divider.v`：三点幅度与 Q1.15 偏移；
-- `g_hann_peak_refiner.v`：频率偏移及 Hann 栅栏损失多项式；
-- `g_hann_amplitude_scaler.v`：块浮点指数和相干增益恢复；
-- `generate_g_fft_spectrum_vectors.m`、`tb_g_fft_spectrum.sv`：位真向量和五帧自检。
-
-自检命令为：
+正式板级实现：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/run_g_fft_spectrum_xsim.ps1
 powershell -ExecutionPolicy Bypass -File scripts/run_g_board_ila_build.ps1
 ```
 
-当前 TJC8048X270_11 最终显示镜像已通过正式门禁：8151 LUT、13325 FF、
-24 BRAM tile、39 DSP，200 MHz WNS `+0.003 ns`、WHS `+0.034 ns`，TNS/THS均为0；DRC无
-Error/Critical Warning，未约束内部端点为0。`.bit/.ltx` 位于
-`results/board_ila/`。由于建立时间裕量较小，任何RTL或ILA改动后都必须重新
-执行完整实现。上一版FFT内部ILA说明保存在
-`hardware/notes/fft_spectrum_ila_test_guide.md`；
-当前校准/UART精简ILA以 `hardware/notes/tjc_calibration_board_test_guide.md` 为准。
+生成的 `.bit/.ltx` 和 manifest 位于 `results/board_ila/`。若要观察 XSim 波形，在对应脚本后使用 GUI 方式运行，并在 Tcl Console 中 source `scripts/wave_*.tcl`。板级探针含义和触发步骤见 `hardware/notes/tjc_calibration_board_test_guide.md`，早期频谱 ILA 说明见 `hardware/notes/fft_spectrum_ila_test_guide.md`。
 
-### 电压校准与 UART 物理量接口
+上板验证建议按以下顺序，不要一开始就测复杂三音：
 
-`g_measurement_calibrator.v` 已把 FFT 输出的三个幅值码转换为可直接交给 UART 的
-物理量：三个分量按频率从低到高输出整数 Hz、峰值 uV 和 RMS uV，同时输出合成
-信号的真 RMS。增益使用 Q16.16 `uV/code`，支持 UART/Flash 直接写系数，也支持
-对已知 Vpp 单音自动平均 16 帧完成现场校准。默认系数只是由当前板测估出的临时
-值，模拟前端确定后仍须在 50 ohm 条件下正式标定。
+1. ADC 断开/零输入，检查时钟、复位、FIFO 和错误 sticky；
+2. 100 kHz、200 mVpp、50 Ω 单音执行现场校准；
+3. 固定 200 mVpp 扫 10、13、50、100、300、500 kHz，检查频率和 Um；
+4. 固定频率扫 50～250 mVpp，检查线性；
+5. 输入已知二音/三音，分别核对 Um、频率、总 RMS 和相位相关的整体 Vpp；
+6. 加入 1 MHz 以上干扰，评估模拟前端完成后任务 3 的抑制能力；
+7. 最后验证串口屏按钮、R19 单次发送、透明传图和超时恢复。
 
-独立自检和 200 MHz 综合命令：
+## 8. 如何判断结果是否合理
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/run_g_measurement_calibrator_xsim.ps1
-powershell -ExecutionPolicy Bypass -File scripts/run_g_measurement_calibrator_synth.ps1
-```
+- `component_count` 决定有几个分量有效；单音时残留的 `peak1/peak2_bin` 调试值不代表检测到了三个信号。
+- 各分量在复数 FFT 上取模，因此不同初相位不会阻止频率和幅值分离；相邻频率若小于 Hann 主瓣可分辨范围，仍可能互相影响。
+- 分量 `Um` 是峰值，信号源通常设置 Vpp，单音二者相差 2 倍。
+- 总 RMS 可由各分量 Um 平方和验证；总 Vpp 必须用相位一致的合成波或时域 max-min 验证。
+- 定性波形和频谱都自动归一化，图的高度不能代替数值标定。
+- 幅值全频段一致并不证明绝对 mV 正确；前者主要验证 Hann/scalloping/FIR 补偿，后者由 50 Ω 条件下的整机校准决定。
+- 频率显示到 1 Hz 不代表精度为 1 Hz；题目判据仍是与信号源标称值相差不超过 1 kHz。
 
-非统一相位的谐波仍可由复数 FFT 模长分离；当前端到端 Testbench 已用三个不同
-初相位覆盖这一情况。接口定义、校准公式、板级步骤、UART 字段和无串口虚拟触发
-方法见 `hardware/notes/measurement_calibration_interface.md`。
+## 9. 目录和开发环境
 
-TJC8048X270_11 已使用115200/8-N-1接入：W18为FPGA TX、W19为FPGA RX。
-单个 `s0` 控件接收800点时域/频谱图；屏幕发送 ASCII `C/1/3/S` 分别触发
-200 mVpp现场校准、单周期、三周期和频谱显示。板载R19/PL KEY1按下后，经20 ms
-消抖只发送一次 `x0..x7` 与当前图，不做周期刷新。`x0/x1`为整体Vpp/真RMS，
-`x2..x7`为三个分量的峰值与频率。屏幕配置、接线安全、精简ILA探针和测试步骤见
-`hardware/notes/tjc_calibration_board_test_guide.md`。
+- `matlab/model/`：浮点模型、定点分析和向量生成器；
+- `matlab/vectors/`：RTL/Testbench 共用的系数和黄金向量；
+- `rtl/src/`：可综合 Verilog-2001 与 Vivado IP wrapper；
+- `rtl/tb/`：自检 SystemVerilog Testbench；
+- `rtl/constraints/`：板级 XDC；
+- `scripts/`：MATLAB、XSim、综合、实现和波形脚本；
+- `hardware/notes/`：接线、ILA 和板测手册；
+- `logs/`、`results/`：日志、报告、bitstream、ltx 和导出数据；
+- `docs/`：本地赛题和厂商资料，不提交 Git。
 
-在上述 XSim 脚本后增加 `-Gui` 可直接打开波形窗口。进入 Tcl Console 后执行
-`source scripts/wave_adc_frontend.tcl`、`source scripts/wave_g_fir.tcl` 或
-`source scripts/wave_g_frame.tcl`、`source scripts/wave_g_fft_input.tcl`；集成流水
-使用 `source scripts/wave_g_pipeline.tcl`。变量说明见
-`hardware/notes/waveform_guide.md`。
+本机基准环境为 MATLAB R2024b、Vivado/XSim 2020.2 和 Git 2.47.1。VS Code、MATLAB 和 Vivado 应引用同一份磁盘源码，不要复制进多个工程后分别修改，也不要同时在三个编辑器中保存同一文件。
+
+## 10. 后续改进方向
+
+1. 完成 50 Ω 模拟前端与 500 kHz 通带平坦、1 MHz 起衰减的抗混叠低通，并实测幅频响应。
+2. 若模拟链路残余频响超过误差预算，引入按频率分段的 `K(f)` 增益表，而不是只用一个全频段标量。
+3. 用高精度频率计或标准源测定 2 MHz 等效采样率误差，必要时增加频率校准系数。
+4. 对相邻谱线、低信噪比和非谐波输入建立拒绝/置信度规则，防止把噪声峰作为有效谐波。
+5. 若资源和时序允许，可把 MATLAB 的多正弦最小二乘拟合或 Goertzel 精修用于已检测频率附近；当前题目精度下不是必需项。
+6. 最终硬件定型后重新执行 MATLAB、XSim、实现、ILA、50 Ω 标定和三项题目全量回归，并保存输入设置、bit/ltx、ILA CSV 与结果表，形成可追溯提交版本。
