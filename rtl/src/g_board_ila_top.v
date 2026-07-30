@@ -25,6 +25,13 @@ module g_board_ila_top (
 
     wire system_rst_n;
     wire adc_return_rst_n;
+    (* max_fanout = 64 *) reg measurement_rst_n;
+    (* max_fanout = 64 *) reg pipeline_rst_n;
+    (* max_fanout = 64 *) reg fft_rst_n;
+    (* max_fanout = 64 *) reg analyzer_rst_n;
+    (* max_fanout = 64 *) reg time_display_rst_n;
+    (* max_fanout = 64 *) reg spectrum_display_rst_n;
+    (* max_fanout = 64 *) reg screen_rst_n;
 
     (* IOB = "TRUE" *) reg [13:0] adc_iob_data;
 
@@ -115,6 +122,23 @@ module g_board_ila_top (
     wire [23:0] component1_rms_uv;
     wire [23:0] component2_rms_uv;
     wire [23:0] total_true_rms_uv;
+    wire total_vpp_valid;
+    wire [15:0] total_vpp_code;
+    wire [23:0] total_vpp_uv;
+    wire waveform_display_ready;
+    wire waveform_render_busy;
+    wire waveform_render_done;
+    wire waveform_request_overrun;
+    wire [7:0] waveform_display_data;
+    wire spectrum_display_ready;
+    wire spectrum_display_done;
+    wire spectrum_display_busy;
+    wire spectrum_display_overrun;
+    wire [7:0] spectrum_display_data;
+    wire [9:0] display_read_addr;
+    wire waveform_render_request;
+    wire uart_three_cycle_mode;
+    wire uart_spectrum_mode;
 
     wire calibrate_start_uart;
     wire [23:0] calibration_reference_vpp_uv;
@@ -122,11 +146,10 @@ module g_board_ila_top (
     wire uart_rx_framing_error_sticky;
     wire uart_send_button_pressed;
     wire uart_tx_busy;
-    wire [1:0] uart_component_count;
-    wire [19:0] uart_fundamental_frequency_hz;
-    wire [19:0] uart_harmonic_frequency_hz;
-    wire [23:0] uart_fundamental_amplitude_uv;
-    wire [23:0] uart_harmonic_amplitude_uv;
+    wire uart_transfer_busy;
+    wire uart_transfer_done;
+    wire uart_transparent_timeout;
+    wire uart_request_overrun;
 
     wire [15:0] ila_measurement_control;
     wire fft_protocol_error;
@@ -199,6 +222,29 @@ module g_board_ila_top (
         .dest_clk(adc_return_clk),
         .dest_arst(adc_return_rst_n)
     );
+
+    // Local reset replicas keep the synchronizer output off the thousands of
+    // reset muxes added by the measurement/display subsystem.  Assertion and
+    // release are still synchronous to clk_200, delayed by one clock only.
+    always @(posedge clk_200) begin
+        if (!system_rst_n) begin
+            measurement_rst_n <= 1'b0;
+            pipeline_rst_n <= 1'b0;
+            fft_rst_n <= 1'b0;
+            analyzer_rst_n <= 1'b0;
+            time_display_rst_n <= 1'b0;
+            spectrum_display_rst_n <= 1'b0;
+            screen_rst_n <= 1'b0;
+        end else begin
+            measurement_rst_n <= 1'b1;
+            pipeline_rst_n <= 1'b1;
+            fft_rst_n <= 1'b1;
+            analyzer_rst_n <= 1'b1;
+            time_display_rst_n <= 1'b1;
+            spectrum_display_rst_n <= 1'b1;
+            screen_rst_n <= 1'b1;
+        end
+    end
 
     always @(posedge adc_return_clk) begin
         if (!adc_return_rst_n)
@@ -308,7 +354,7 @@ module g_board_ila_top (
         .ADC_OFFSET_BINARY(0)
     ) processing_pipeline (
         .clk(clk_200),
-        .rst_n(system_rst_n),
+        .rst_n(pipeline_rst_n),
         .capture_enable(1'b1),
         .adc_valid(adc_stream_valid),
         .adc_data(fifo_dout),
@@ -332,7 +378,7 @@ module g_board_ila_top (
     );
 
     g_fft_core_wrapper fft_wrapper (
-        .clk(clk_200), .rst_n(system_rst_n),
+        .clk(clk_200), .rst_n(fft_rst_n),
         .input_valid(fft_valid), .input_ready(fft_input_ready),
         .input_real(fft_real), .input_imag(fft_imag),
         .input_last(fft_last), .output_valid(fft_output_valid),
@@ -344,7 +390,7 @@ module g_board_ila_top (
     );
 
     g_spectrum_analyzer spectrum_analyzer (
-        .clk(clk_200), .rst_n(system_rst_n),
+        .clk(clk_200), .rst_n(analyzer_rst_n),
         .fft_valid(fft_output_valid), .fft_ready(fft_output_ready),
         .fft_real(fft_output_real), .fft_imag(fft_output_imag),
         .fft_bin(fft_output_bin),
@@ -370,7 +416,7 @@ module g_board_ila_top (
     // Field calibration is initiated by the TJC screen sending ASCII 'C'.
     // The reference is fixed to the documented 200 mVpp calibration sine.
     g_measurement_calibrator measurement_calibrator (
-        .clk(clk_200), .rst_n(system_rst_n),
+        .clk(clk_200), .rst_n(measurement_rst_n),
         .spectrum_results_valid(spectrum_results_valid),
         .component_count_in(component_count),
         .peak0_frequency_hz(peak0_frequency_hz),
@@ -401,29 +447,75 @@ module g_board_ila_top (
         .total_true_rms_uv(total_true_rms_uv)
     );
 
+    // The post-FIR 20 MSPS stream preserves enough time resolution for an
+    // accurate phase-dependent composite Vpp and for a qualitative waveform
+    // containing exactly one or three fundamental periods.
+    g_time_domain_display time_domain_display (
+        .clk(clk_200), .rst_n(time_display_rst_n),
+        .sample_valid(debug_fir_output_valid),
+        .sample_data(debug_fir_output_data),
+        .measurement_valid(measurement_valid),
+        .fundamental_frequency_hz(component0_frequency_hz),
+        .active_gain_q16(calibration_gain_q16),
+        .render_request(waveform_render_request),
+        .render_three_cycles(uart_three_cycle_mode),
+        .display_read_addr(display_read_addr),
+        .display_read_data(waveform_display_data),
+        .display_ready(waveform_display_ready),
+        .render_busy(waveform_render_busy),
+        .render_done(waveform_render_done),
+        .request_overrun(waveform_request_overrun),
+        .total_vpp_valid(total_vpp_valid),
+        .total_vpp_code(total_vpp_code),
+        .total_vpp_uv(total_vpp_uv)
+    );
+
+    g_spectrum_display spectrum_display (
+        .clk(clk_200), .rst_n(spectrum_display_rst_n),
+        .spectrum_valid(spectrum_valid),
+        .spectrum_bin(spectrum_bin), .spectrum_power(spectrum_power),
+        .display_read_addr(display_read_addr),
+        .display_read_data(spectrum_display_data),
+        .display_ready(spectrum_display_ready),
+        .frame_done(spectrum_display_done),
+        .processing_busy(spectrum_display_busy),
+        .capture_overrun(spectrum_display_overrun)
+    );
+
     g_tjc_display_uart screen_interface (
-        .clk(clk_200), .rst_n(system_rst_n),
+        .clk(clk_200), .rst_n(screen_rst_n),
         .uart_rx(uart_rx), .uart_tx(uart_tx),
         .send_button_n(send_button_n),
-        .measurement_valid(measurement_valid),
+        .measurement_valid(total_vpp_valid),
         .component_count(measurement_component_count),
+        .total_vpp_uv(total_vpp_uv),
+        .total_true_rms_uv(total_true_rms_uv),
         .component0_frequency_hz(component0_frequency_hz),
         .component1_frequency_hz(component1_frequency_hz),
+        .component2_frequency_hz(component2_frequency_hz),
         .component0_amplitude_uv(component0_amplitude_uv),
         .component1_amplitude_uv(component1_amplitude_uv),
+        .component2_amplitude_uv(component2_amplitude_uv),
+        .waveform_display_ready(waveform_display_ready),
+        .waveform_render_busy(waveform_render_busy),
+        .waveform_render_done(waveform_render_done),
+        .waveform_display_data(waveform_display_data),
+        .spectrum_display_ready(spectrum_display_ready),
+        .spectrum_display_data(spectrum_display_data),
+        .display_read_addr(display_read_addr),
+        .waveform_render_request(waveform_render_request),
+        .three_cycle_mode(uart_three_cycle_mode),
+        .spectrum_mode(uart_spectrum_mode),
         .calibrate_start(calibrate_start_uart),
         .calibration_reference_vpp_uv(calibration_reference_vpp_uv),
         .rx_calibrate_command(uart_rx_calibrate_command),
         .rx_framing_error_sticky(uart_rx_framing_error_sticky),
         .send_button_pressed(uart_send_button_pressed),
         .tx_busy(uart_tx_busy),
-        .transmitted_component_count(uart_component_count),
-        .transmitted_fundamental_frequency_hz(
-            uart_fundamental_frequency_hz),
-        .transmitted_harmonic_frequency_hz(uart_harmonic_frequency_hz),
-        .transmitted_fundamental_amplitude_uv(
-            uart_fundamental_amplitude_uv),
-        .transmitted_harmonic_amplitude_uv(uart_harmonic_amplitude_uv)
+        .transfer_busy(uart_transfer_busy),
+        .transfer_done(uart_transfer_done),
+        .transparent_timeout_sticky(uart_transparent_timeout),
+        .request_overrun(uart_request_overrun)
     );
 
     // In Non-Realtime mode event_data_in_channel_halt reports a permitted
@@ -432,35 +524,34 @@ module g_board_ila_top (
     assign fft_protocol_error = fft_error_sticky[0] |
         fft_error_sticky[1] | fft_error_sticky[2] | fft_error_sticky[4];
 
-    // Compact health/control probe for calibration and two-component testing.
-    assign ila_measurement_control[0] = measurement_valid;
-    assign ila_measurement_control[1] = spectrum_results_valid;
+    // Compact final-display health/control probe.
+    assign ila_measurement_control[0] = total_vpp_valid;
+    assign ila_measurement_control[1] = measurement_valid;
     assign ila_measurement_control[2] = calibration_busy;
     assign ila_measurement_control[3] = calibration_done;
     assign ila_measurement_control[4] = calibration_error;
-    assign ila_measurement_control[5] = uart_rx_calibrate_command;
-    assign ila_measurement_control[6] = uart_send_button_pressed;
-    assign ila_measurement_control[7] = uart_tx_busy;
-    assign ila_measurement_control[8] = measurement_overrun;
-    assign ila_measurement_control[9] = uart_rx_framing_error_sticky;
-    assign ila_measurement_control[10] = fft_configured;
-    assign ila_measurement_control[11] = fft_protocol_error;
-    assign ila_measurement_control[12] = fifo_empty;
-    assign ila_measurement_control[13] = fifo_status_sync[2];
-    assign ila_measurement_control[14] = fifo_underflow;
+    assign ila_measurement_control[5] = uart_send_button_pressed;
+    assign ila_measurement_control[6] = uart_transfer_busy;
+    assign ila_measurement_control[7] = uart_transfer_done;
+    assign ila_measurement_control[8] = uart_transparent_timeout;
+    assign ila_measurement_control[9] = measurement_overrun |
+        waveform_request_overrun | spectrum_display_overrun |
+        uart_request_overrun | uart_rx_framing_error_sticky;
+    assign ila_measurement_control[11:10] = measurement_component_count;
+    assign ila_measurement_control[12] = uart_spectrum_mode;
+    assign ila_measurement_control[13] = uart_three_cycle_mode;
+    assign ila_measurement_control[14] = fft_protocol_error;
     assign ila_measurement_control[15] = system_rst_n;
 
     board_ila initial_validation_ila (
         .clk(clk_200),
-        .probe0(fifo_dout),
-        .probe1(measurement_component_count),
+        .probe0(total_vpp_uv),
+        .probe1(total_true_rms_uv),
         .probe2(component0_frequency_hz),
         .probe3(component0_amplitude_uv),
         .probe4(component1_frequency_hz),
         .probe5(component1_amplitude_uv),
-        .probe6(total_true_rms_uv),
-        .probe7(calibration_gain_q16),
-        .probe8(ila_measurement_control)
+        .probe6(ila_measurement_control)
     );
 
 endmodule

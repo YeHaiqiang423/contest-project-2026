@@ -29,6 +29,8 @@ add_files [list \
     [file join $project_root rtl src g_fft_core_wrapper.v] \
     [file join $project_root rtl src g_spectrum_analyzer.v] \
     [file join $project_root rtl src g_measurement_calibrator.v] \
+    [file join $project_root rtl src g_time_domain_display.v] \
+    [file join $project_root rtl src g_spectrum_display.v] \
     [file join $project_root rtl src g_processing_pipeline.v] \
     [file join $project_root rtl src g_board_ila_top.v]]
 add_files -fileset constrs_1 [file join $project_root rtl constraints g_board_ila.xdc]
@@ -56,17 +58,15 @@ wait_on_run g_fft_4096_ip_synth_1
 
 create_ip -name ila -vendor xilinx.com -library ip -module_name board_ila
 set_property -dict [list \
-    CONFIG.C_NUM_OF_PROBES {9} \
-    CONFIG.C_PROBE0_WIDTH {14} \
-    CONFIG.C_PROBE1_WIDTH {2} \
+    CONFIG.C_NUM_OF_PROBES {7} \
+    CONFIG.C_PROBE0_WIDTH {24} \
+    CONFIG.C_PROBE1_WIDTH {24} \
     CONFIG.C_PROBE2_WIDTH {20} \
     CONFIG.C_PROBE3_WIDTH {24} \
     CONFIG.C_PROBE4_WIDTH {20} \
     CONFIG.C_PROBE5_WIDTH {24} \
-    CONFIG.C_PROBE6_WIDTH {24} \
-    CONFIG.C_PROBE7_WIDTH {24} \
-    CONFIG.C_PROBE8_WIDTH {16} \
-    CONFIG.C_DATA_DEPTH {4096} \
+    CONFIG.C_PROBE6_WIDTH {16} \
+    CONFIG.C_DATA_DEPTH {2048} \
     CONFIG.C_INPUT_PIPE_STAGES {2} \
     CONFIG.C_ADV_TRIGGER {false} \
     CONFIG.C_EN_STRG_QUAL {1}] [get_ips board_ila]
@@ -160,9 +160,11 @@ puts $manifest "FFT throttle scheme: Non-Realtime"
 puts $manifest "Spectrum band: bins 20..1024 (10 kHz..500 kHz at 2 MSPS)"
 puts $manifest "UART: W18 TX / W19 RX, LVCMOS33, 115200 8-N-1"
 puts $manifest "Send button: PL KEY1 R19, active low, 20 ms debounce"
-puts $manifest "Screen calibration command: ASCII C (0x43), 200000 uVpp reference"
-puts $manifest "ILA depth: 4096 samples at 200 MHz"
-puts $manifest "ILA probes: 9, calibration plus fundamental/harmonic physical values"
+puts $manifest "Screen: TJC8048X270_11, one 800x256 waveform component s0"
+puts $manifest "Screen commands: C(0x43) calibrate, 1(0x31), 3(0x33), S(0x53) spectrum"
+puts $manifest "Screen transfer: x0..x7 plus addt s0.id,0,800 with FE/FD handshake"
+puts $manifest "ILA depth: 2048 samples at 200 MHz"
+puts $manifest "ILA probes: 7, Vpp/RMS, first two component values and compact health"
 puts $manifest "Setup slack: $setup_slack ns"
 puts $manifest "Hold slack: $hold_slack ns"
 puts $manifest "Unconstrained paths: $unconstrained_count"

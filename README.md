@@ -295,8 +295,8 @@ powershell -ExecutionPolicy Bypass -File scripts/run_g_fft_spectrum_xsim.ps1
 powershell -ExecutionPolicy Bypass -File scripts/run_g_board_ila_build.ps1
 ```
 
-当前校准/UART板测镜像已通过正式门禁：6521 LUT、11906 FF、29 BRAM tile、
-35 DSP，200 MHz WNS `+0.016 ns`、WHS `+0.034 ns`，TNS/THS均为0；DRC无
+当前 TJC8048X270_11 最终显示镜像已通过正式门禁：8151 LUT、13325 FF、
+24 BRAM tile、39 DSP，200 MHz WNS `+0.003 ns`、WHS `+0.034 ns`，TNS/THS均为0；DRC无
 Error/Critical Warning，未约束内部端点为0。`.bit/.ltx` 位于
 `results/board_ila/`。由于建立时间裕量较小，任何RTL或ILA改动后都必须重新
 执行完整实现。上一版FFT内部ILA说明保存在
@@ -322,10 +322,11 @@ powershell -ExecutionPolicy Bypass -File scripts/run_g_measurement_calibrator_sy
 初相位覆盖这一情况。接口定义、校准公式、板级步骤、UART 字段和无串口虚拟触发
 方法见 `hardware/notes/measurement_calibration_interface.md`。
 
-TJC4827T143 已使用115200/8-N-1接入：W18为FPGA TX、W19为FPGA RX。屏幕
-发送 ASCII `C` 触发200 mVpp现场校准；板载R19/PL KEY1按下后，经20 ms消抖
-只发送一次最近测量值到 `x0/x2/x3/x4`，不做周期刷新。屏幕配置、接线安全、
-精简ILA探针和二次谐波测试步骤见
+TJC8048X270_11 已使用115200/8-N-1接入：W18为FPGA TX、W19为FPGA RX。
+单个 `s0` 控件接收800点时域/频谱图；屏幕发送 ASCII `C/1/3/S` 分别触发
+200 mVpp现场校准、单周期、三周期和频谱显示。板载R19/PL KEY1按下后，经20 ms
+消抖只发送一次 `x0..x7` 与当前图，不做周期刷新。`x0/x1`为整体Vpp/真RMS，
+`x2..x7`为三个分量的峰值与频率。屏幕配置、接线安全、精简ILA探针和测试步骤见
 `hardware/notes/tjc_calibration_board_test_guide.md`。
 
 在上述 XSim 脚本后增加 `-Gui` 可直接打开波形窗口。进入 Tcl Console 后执行

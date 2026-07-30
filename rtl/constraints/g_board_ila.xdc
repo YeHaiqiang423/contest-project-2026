@@ -16,7 +16,7 @@ set_property PACKAGE_PIN R19 [get_ports send_button_n]
 set_property IOSTANDARD LVCMOS33 [get_ports send_button_n]
 set_false_path -from [get_ports send_button_n]
 
-# TJC4827T143 serial link, 115200 baud, 8-N-1. Screen TX voltage must be
+# TJC8048X270_11 serial link, 115200 baud, 8-N-1. Screen TX voltage must be
 # confirmed as 3.3 V compatible (or level shifted) before connecting uart_rx.
 set_property PACKAGE_PIN W18 [get_ports uart_tx]
 set_property IOSTANDARD LVCMOS33 [get_ports uart_tx]

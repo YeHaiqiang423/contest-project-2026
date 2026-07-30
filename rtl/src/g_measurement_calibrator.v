@@ -13,7 +13,9 @@
 // and computes gain from a known reference Vpp without requiring a UART.
 module g_measurement_calibrator #(
     parameter [23:0] DEFAULT_GAIN_UV_PER_CODE_Q16 = 24'd2070648,
-    parameter integer CAL_AVERAGE_LOG2 = 4
+    parameter integer CAL_AVERAGE_LOG2 = 4,
+    parameter integer CALIBRATION_FREQUENCY_HZ = 100000,
+    parameter integer CALIBRATION_FREQUENCY_TOLERANCE_HZ = 1000
 ) (
     input  wire        clk,
     input  wire        rst_n,
@@ -349,7 +351,13 @@ module g_measurement_calibrator #(
             end else if (calibration_state == 3'd1 &&
                     spectrum_results_valid) begin
                 if (component_count_in != 2'd1 ||
-                        peak0_amplitude_code == 16'd0) begin
+                        peak0_amplitude_code == 16'd0 ||
+                        peak0_frequency_hz <
+                            CALIBRATION_FREQUENCY_HZ-
+                            CALIBRATION_FREQUENCY_TOLERANCE_HZ ||
+                        peak0_frequency_hz >
+                            CALIBRATION_FREQUENCY_HZ+
+                            CALIBRATION_FREQUENCY_TOLERANCE_HZ) begin
                     calibration_busy <= 1'b0;
                     calibration_done <= 1'b1;
                     calibration_error <= 1'b1;
