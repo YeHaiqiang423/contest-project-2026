@@ -10,6 +10,24 @@ set_property PACKAGE_PIN B19 [get_ports rst_n]
 set_property IOSTANDARD LVCMOS33 [get_ports rst_n]
 set_false_path -from [get_ports rst_n]
 
+# PL KEY1/R19: board schematic shows a 10 kohm pull-up to 3.3 V and an
+# active-low switch to ground. RTL adds a 20 ms digital debounce filter.
+set_property PACKAGE_PIN R19 [get_ports send_button_n]
+set_property IOSTANDARD LVCMOS33 [get_ports send_button_n]
+set_false_path -from [get_ports send_button_n]
+
+# TJC4827T143 serial link, 115200 baud, 8-N-1. Screen TX voltage must be
+# confirmed as 3.3 V compatible (or level shifted) before connecting uart_rx.
+set_property PACKAGE_PIN W18 [get_ports uart_tx]
+set_property IOSTANDARD LVCMOS33 [get_ports uart_tx]
+set_property DRIVE 8 [get_ports uart_tx]
+set_property SLEW SLOW [get_ports uart_tx]
+set_false_path -to [get_ports uart_tx]
+
+set_property PACKAGE_PIN W19 [get_ports uart_rx]
+set_property IOSTANDARD LVCMOS33 [get_ports uart_rx]
+set_false_path -from [get_ports uart_rx]
+
 set_property PACKAGE_PIN L19 [get_ports adc0_clk_out]
 set_property IOSTANDARD LVCMOS33 [get_ports adc0_clk_out]
 set_property DRIVE 16 [get_ports adc0_clk_out]

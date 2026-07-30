@@ -1,5 +1,9 @@
 # ADS6149 到 FFT 频谱结果：新版 ILA 板测指南
 
+> 历史说明：本文件的17探针映射适用于上一版FFT调试镜像。2026-07-30起的
+> 校准/UART镜像已精简为9探针，请以
+> `hardware/notes/tjc_calibration_board_test_guide.md` 为准。
+
 更新日期：2026-07-29  
 适用器件：Mizar Z7，`xc7z020clg400-2`，ADC0 直插 ADS6149  
 工具版本：Vivado 2020.2
@@ -11,13 +15,16 @@
 `ADS6149 200 MSPS -> 异步 FIFO -> /10 -> 20 MSPS -> 255 tap FIR -> /10 -> 2 MSPS -> 4096 点帧 -> Hann -> Xilinx FFT -> 功率谱 -> 最强三峰 -> 基波频率/幅值码/分量数`
 
 FFT 固定为 4096 点、自然顺序、16 bit 定点、块浮点缩放。频率间隔为
-`2 MHz/4096 = 488.28125 Hz`。只在 10 kHz--500 kHz，即 bin 21--1024
-之间检测局部峰值，最多报告三个分量。
+`2 MHz/4096 = 488.28125 Hz`。峰值搜索从 bin 20 开始以覆盖 10 kHz 下边界，
+上限为 bin 1024；最终仍按插值后的频率判定 10 kHz--500 kHz，有效频带内最多
+报告三个分量。
 
 当前频率输出已经使用峰值左右相邻 bin 的 Hann 三点公式估计小数 bin；幅值输出
 在相干增益和 FFT 块指数恢复的基础上，按该小数 bin 修正 Hann 栅栏损失。粗略
 `peakN_bin` 仍保留整数 bin 便于观察，`fundamental_frequency_hz` 是细化后的结果。
 输出幅值仍是 ADC 峰值码，必须经过板级电压校准后才能成为满足 5 mV 指标的 mV 值。
+校准 RTL、UART 物理量接口以及无串口的虚拟触发方法见
+`hardware/notes/measurement_calibration_interface.md`。
 
 赛题原文的板测硬约束如下：信号源输出阻抗为 50 Ω；测试电缆为 50 Ω、两端
 BNC；信号发生器各参数设置值作为测量标称值。因此装置输入按 50 Ω 系统匹配，

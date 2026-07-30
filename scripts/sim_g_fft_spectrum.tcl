@@ -7,11 +7,13 @@ set_property simulator_language Mixed [current_project]
 
 add_files [list \
     [file join $project_root rtl src g_integer_sqrt.v] \
+    [file join $project_root rtl src g_unsigned_divider.v] \
     [file join $project_root rtl src g_fractional_divider.v] \
     [file join $project_root rtl src g_hann_amplitude_scaler.v] \
     [file join $project_root rtl src g_hann_peak_refiner.v] \
     [file join $project_root rtl src g_fft_core_wrapper.v] \
-    [file join $project_root rtl src g_spectrum_analyzer.v]]
+    [file join $project_root rtl src g_spectrum_analyzer.v] \
+    [file join $project_root rtl src g_measurement_calibrator.v]]
 add_files -fileset sim_1 [file join $project_root rtl tb tb_g_fft_spectrum.sv]
 set_property top tb_g_fft_spectrum [get_filesets sim_1]
 

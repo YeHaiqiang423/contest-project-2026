@@ -6,9 +6,12 @@
 module g_board_ila_top (
     input  wire        clk,
     input  wire        rst_n,
+    input  wire        send_button_n,
     input  wire [13:0] adc0_data,
     input  wire        adc0_clk_in,
-    output wire        adc0_clk_out
+    output wire        adc0_clk_out,
+    input  wire        uart_rx,
+    output wire        uart_tx
 );
 
     wire clk_50_ibuf;
@@ -82,6 +85,9 @@ module g_board_ila_top (
     wire [11:0] peak0_bin;
     wire [11:0] peak1_bin;
     wire [11:0] peak2_bin;
+    wire [19:0] peak0_frequency_hz;
+    wire [19:0] peak1_frequency_hz;
+    wire [19:0] peak2_frequency_hz;
     wire [32:0] peak0_power;
     wire [32:0] peak1_power;
     wire [32:0] peak2_power;
@@ -90,9 +96,39 @@ module g_board_ila_top (
     wire [15:0] peak2_amplitude_code;
     wire [4:0] result_block_exponent;
 
-    wire [15:0] ila_control;
-    wire [7:0] ila_fifo_status;
-    wire [15:0] ila_spectrum_control;
+    // UART handoff interface. Values are sorted by ascending frequency;
+    // amplitude is sine peak voltage and all voltage quantities use uV.
+    wire [23:0] calibration_gain_q16;
+    wire calibration_busy;
+    wire calibration_done;
+    wire calibration_error;
+    wire measurement_valid;
+    wire measurement_overrun;
+    wire [1:0] measurement_component_count;
+    wire [19:0] component0_frequency_hz;
+    wire [19:0] component1_frequency_hz;
+    wire [19:0] component2_frequency_hz;
+    wire [23:0] component0_amplitude_uv;
+    wire [23:0] component1_amplitude_uv;
+    wire [23:0] component2_amplitude_uv;
+    wire [23:0] component0_rms_uv;
+    wire [23:0] component1_rms_uv;
+    wire [23:0] component2_rms_uv;
+    wire [23:0] total_true_rms_uv;
+
+    wire calibrate_start_uart;
+    wire [23:0] calibration_reference_vpp_uv;
+    wire uart_rx_calibrate_command;
+    wire uart_rx_framing_error_sticky;
+    wire uart_send_button_pressed;
+    wire uart_tx_busy;
+    wire [1:0] uart_component_count;
+    wire [19:0] uart_fundamental_frequency_hz;
+    wire [19:0] uart_harmonic_frequency_hz;
+    wire [23:0] uart_fundamental_amplitude_uv;
+    wire [23:0] uart_harmonic_amplitude_uv;
+
+    wire [15:0] ila_measurement_control;
     wire fft_protocol_error;
 
     IBUF clock_input_buffer (
@@ -320,6 +356,9 @@ module g_board_ila_top (
         .component_count(component_count), .fundamental_bin(fundamental_bin),
         .fundamental_frequency_hz(fundamental_frequency_hz),
         .peak0_bin(peak0_bin), .peak1_bin(peak1_bin), .peak2_bin(peak2_bin),
+        .peak0_frequency_hz(peak0_frequency_hz),
+        .peak1_frequency_hz(peak1_frequency_hz),
+        .peak2_frequency_hz(peak2_frequency_hz),
         .peak0_power(peak0_power), .peak1_power(peak1_power),
         .peak2_power(peak2_power),
         .peak0_amplitude_code(peak0_amplitude_code),
@@ -328,68 +367,100 @@ module g_board_ila_top (
         .result_block_exponent(result_block_exponent)
     );
 
-    // ila_control bit definitions are documented in hardware/notes/ila_test_guide.md.
-    assign ila_control[0] = mmcm_locked;
-    assign ila_control[1] = system_rst_n;
-    assign ila_control[2] = adc_stream_valid;
-    assign ila_control[3] = debug_adc_sample_valid;
-    assign ila_control[4] = debug_fir_output_valid;
-    assign ila_control[5] = debug_frame_ready;
-    assign ila_control[6] = debug_frame_bank;
-    assign ila_control[8:7] = bank_pending;
-    assign ila_control[9] = fft_valid;
-    assign ila_control[10] = fifo_read_started;
-    assign ila_control[11] = fft_last;
-    assign ila_control[12] = frame_done;
-    assign ila_control[13] = adc_input_overrun;
-    assign ila_control[14] = frame_overrun;
-    assign ila_control[15] = scheduler_overrun;
+    // Field calibration is initiated by the TJC screen sending ASCII 'C'.
+    // The reference is fixed to the documented 200 mVpp calibration sine.
+    g_measurement_calibrator measurement_calibrator (
+        .clk(clk_200), .rst_n(system_rst_n),
+        .spectrum_results_valid(spectrum_results_valid),
+        .component_count_in(component_count),
+        .peak0_frequency_hz(peak0_frequency_hz),
+        .peak1_frequency_hz(peak1_frequency_hz),
+        .peak2_frequency_hz(peak2_frequency_hz),
+        .peak0_amplitude_code(peak0_amplitude_code),
+        .peak1_amplitude_code(peak1_amplitude_code),
+        .peak2_amplitude_code(peak2_amplitude_code),
+        .gain_write(1'b0), .gain_write_q16(24'd0),
+        .calibrate_start(calibrate_start_uart),
+        .calibration_reference_vpp_uv(calibration_reference_vpp_uv),
+        .active_gain_q16(calibration_gain_q16),
+        .calibration_busy(calibration_busy),
+        .calibration_done(calibration_done),
+        .calibration_error(calibration_error),
+        .measurement_valid(measurement_valid),
+        .measurement_overrun(measurement_overrun),
+        .component_count(measurement_component_count),
+        .component0_frequency_hz(component0_frequency_hz),
+        .component1_frequency_hz(component1_frequency_hz),
+        .component2_frequency_hz(component2_frequency_hz),
+        .component0_amplitude_uv(component0_amplitude_uv),
+        .component1_amplitude_uv(component1_amplitude_uv),
+        .component2_amplitude_uv(component2_amplitude_uv),
+        .component0_rms_uv(component0_rms_uv),
+        .component1_rms_uv(component1_rms_uv),
+        .component2_rms_uv(component2_rms_uv),
+        .total_true_rms_uv(total_true_rms_uv)
+    );
 
-    assign ila_fifo_status[0] = fifo_empty;
-    assign ila_fifo_status[1] = fifo_status_sync[0];
-    assign ila_fifo_status[2] = fifo_status_sync[1];
-    assign ila_fifo_status[3] = fifo_status_sync[2];
-    assign ila_fifo_status[4] = fifo_underflow;
-    assign ila_fifo_status[5] = fifo_status_sync[3];
-    assign ila_fifo_status[6] = fifo_rd_rst_busy;
-    assign ila_fifo_status[7] = fifo_status_sync[4];
+    g_tjc_display_uart screen_interface (
+        .clk(clk_200), .rst_n(system_rst_n),
+        .uart_rx(uart_rx), .uart_tx(uart_tx),
+        .send_button_n(send_button_n),
+        .measurement_valid(measurement_valid),
+        .component_count(measurement_component_count),
+        .component0_frequency_hz(component0_frequency_hz),
+        .component1_frequency_hz(component1_frequency_hz),
+        .component0_amplitude_uv(component0_amplitude_uv),
+        .component1_amplitude_uv(component1_amplitude_uv),
+        .calibrate_start(calibrate_start_uart),
+        .calibration_reference_vpp_uv(calibration_reference_vpp_uv),
+        .rx_calibrate_command(uart_rx_calibrate_command),
+        .rx_framing_error_sticky(uart_rx_framing_error_sticky),
+        .send_button_pressed(uart_send_button_pressed),
+        .tx_busy(uart_tx_busy),
+        .transmitted_component_count(uart_component_count),
+        .transmitted_fundamental_frequency_hz(
+            uart_fundamental_frequency_hz),
+        .transmitted_harmonic_frequency_hz(uart_harmonic_frequency_hz),
+        .transmitted_fundamental_amplitude_uv(
+            uart_fundamental_amplitude_uv),
+        .transmitted_harmonic_amplitude_uv(uart_harmonic_amplitude_uv)
+    );
 
-    assign ila_spectrum_control[0] = fft_configured;
-    assign ila_spectrum_control[1] = fft_valid;
-    assign ila_spectrum_control[2] = fft_input_ready;
-    assign ila_spectrum_control[3] = fft_output_valid;
-    assign ila_spectrum_control[4] = fft_output_last;
-    assign ila_spectrum_control[5] = spectrum_valid;
-    assign ila_spectrum_control[6] = spectrum_results_valid;
-    assign ila_spectrum_control[8:7] = component_count;
-    assign ila_spectrum_control[13:9] = result_block_exponent;
-    assign ila_spectrum_control[14] = fft_frame_started;
     // In Non-Realtime mode event_data_in_channel_halt reports a permitted
     // upstream wait state. The core pauses and the frame remains valid, so it
     // is exposed separately but excluded from the protocol-error summary.
     assign fft_protocol_error = fft_error_sticky[0] |
         fft_error_sticky[1] | fft_error_sticky[2] | fft_error_sticky[4];
-    assign ila_spectrum_control[15] = fft_protocol_error;
+
+    // Compact health/control probe for calibration and two-component testing.
+    assign ila_measurement_control[0] = measurement_valid;
+    assign ila_measurement_control[1] = spectrum_results_valid;
+    assign ila_measurement_control[2] = calibration_busy;
+    assign ila_measurement_control[3] = calibration_done;
+    assign ila_measurement_control[4] = calibration_error;
+    assign ila_measurement_control[5] = uart_rx_calibrate_command;
+    assign ila_measurement_control[6] = uart_send_button_pressed;
+    assign ila_measurement_control[7] = uart_tx_busy;
+    assign ila_measurement_control[8] = measurement_overrun;
+    assign ila_measurement_control[9] = uart_rx_framing_error_sticky;
+    assign ila_measurement_control[10] = fft_configured;
+    assign ila_measurement_control[11] = fft_protocol_error;
+    assign ila_measurement_control[12] = fifo_empty;
+    assign ila_measurement_control[13] = fifo_status_sync[2];
+    assign ila_measurement_control[14] = fifo_underflow;
+    assign ila_measurement_control[15] = system_rst_n;
 
     board_ila initial_validation_ila (
         .clk(clk_200),
         .probe0(fifo_dout),
-        .probe1(debug_fir_output_data),
-        .probe2(fft_real),
-        .probe3({fft_output_imag, fft_output_real}),
-        .probe4(spectrum_power),
-        .probe5(spectrum_bin),
-        .probe6(peak0_bin),
-        .probe7(peak1_bin),
-        .probe8(peak2_bin),
-        .probe9(peak0_amplitude_code),
-        .probe10(peak1_amplitude_code),
-        .probe11(peak2_amplitude_code),
-        .probe12(fundamental_frequency_hz),
-        .probe13(ila_spectrum_control),
-        .probe14(ila_control),
-        .probe15(ila_fifo_status),
-        .probe16(fft_error_sticky)
+        .probe1(measurement_component_count),
+        .probe2(component0_frequency_hz),
+        .probe3(component0_amplitude_uv),
+        .probe4(component1_frequency_hz),
+        .probe5(component1_amplitude_uv),
+        .probe6(total_true_rms_uv),
+        .probe7(calibration_gain_q16),
+        .probe8(ila_measurement_control)
     );
 
 endmodule

@@ -102,9 +102,10 @@ BNC/50 ohm -> 模拟抗混叠/抑制干扰低通 -> ADA4937 -> ADS6149
            -> UART 数值与波形数据包
 ```
 
-2 MSPS 下 4096 点变换的频率间隔为 488.28125 Hz。频谱峰用于定位分量，随后
-用正弦/余弦最小二乘拟合估计频率、相位和峰值幅度；`Urms` 根据谐波幅度计算，
-`Upp` 在稠密重建的一个基波周期上求取。任务 3 必须同时依赖模拟和数字滤波：
+2 MSPS 下 4096 点变换的频率间隔为 488.28125 Hz。当前板级 RTL 用 Hann 三点
+插值估计亚 bin 频率和恢复峰值幅度；正弦/余弦最小二乘拟合是后续可选的进一步
+精修手段，不是当前 ILA 结果的来源。`Urms` 根据谐波幅度计算，`Upp` 在稠密重建
+的一个基波周期上求取。任务 3 必须同时依赖模拟和数字滤波：
 模拟低通应通过 500 kHz，并从 1 MHz 起提供足够衰减，避免任意高频干扰在首次
 抽取时混叠进有用带宽。当前数字模型明确假设此前端条件成立。
 
@@ -149,6 +150,144 @@ ADC 输入时序或可以生成 bitstream。
 板级频谱闭环现已加入 Vivado FFT v9.1：4096 点、自然顺序、16 bit 定点块浮点，
 并实现 10--500 kHz 三峰搜索、Hann 三点小数-bin 频率估计，以及栅栏损失/块指数
 补偿后的 ADC 幅值码。10 kHz 下边界和 0.4-bin 幅值衰减已有自动回归覆盖。
+
+### Hann 加窗后如何恢复幅值
+
+“FFT 无衰减加窗”不是指存在一种既抑制泄漏、又完全不改变幅值的窗。Hann 窗
+必然带来两种确定性损失：约 0.5 的相干增益，以及信号不落在整数 bin 中心时的
+栅栏损失。本工程先加窗降低频谱泄漏，再在 FFT 后把这两种损失分别补回来，因而
+最终输出接近加窗前的正弦峰值 ADC code。
+
+4096 点对称 Hann 窗定义为：
+
+```text
+w[n] = 0.5 - 0.5*cos(2*pi*n/(N-1)),  n = 0...N-1, N = 4096
+```
+
+MATLAB 把 `w[n]` 量化为 Q1.15：`round(w[n]*32767)`。由于窗左右对称，FPGA
+只在 BRAM 中保存前 2048 个系数，后半窗通过地址镜像读取。每个 16 bit 样本与
+16 bit 窗系数相乘，经对称舍入右移 15 bit 后送入 FFT：
+
+```text
+xw[n] = round(x[n] * w_q15[n] / 2^15)
+```
+
+对实正弦峰值 `A`，若频率恰好落在 bin 中心，则单边 FFT 峰值幅度近似为：
+
+```text
+Mcenter ~= A * N * CG / 2 * 2^(-B)
+CG = sum(w[n])/N ~= 0.499878
+```
+
+其中 `B` 是 Vivado FFT 块浮点输出的 `block_exponent`。本窗满足
+`N*CG/2 = 1023.75`，非常接近 `2^10=1024`，所以 RTL 用以下移位恢复 ADC
+峰值码：
+
+```text
+Acenter ~= Mcenter * 2^(B-10)
+```
+
+`g_hann_amplitude_scaler.v` 每拍只移动一位，以避免在 200 MHz 路径上生成可变
+桶形移位器。用 1024 近似 1023.75 只产生约 0.0244% 的固定比例误差；最终的
+模拟前端增益、ADC 满量程和该微小残差统一由电压校准系数吸收。
+
+仅补相干增益仍不够。频率偏离 bin 中心时，Hann 主瓣能量会分散到相邻点。例如
+300 kHz 在本系统中位于 bin 614.4；只读取 bin 614 会保留约 0.9008 的幅值，
+即约 `-0.91 dB`。RTL 因此保存峰值左、中、右三个功率，先计算幅度：
+
+```text
+L = sqrt(P[k-1]), C = sqrt(P[k]), R = sqrt(P[k+1])
+```
+
+然后用同一组三点估算峰值相对整数 bin 的偏移 `delta`：
+
+```text
+delta = 2*(R-L)/(L+2*C+R),  -0.5 <= delta <= 0.5
+```
+
+`delta` 使用 signed Q1.15。针对本项目的 4096 点对称 Hann 窗，离线拟合得到
+栅栏损失倒数的偶次多项式：
+
+```text
+Hcorr(delta) ~= 1 + 0.64744225*delta^2 + 0.25902453*delta^4
+```
+
+RTL 将两个系数量化为 Q16 的 `42431` 和 `16975`，先计算
+`Ccorrected=C*Hcorr(delta)`，再执行块指数/相干增益恢复。该多项式在
+`delta=-0.5...+0.5` 范围内对本窗的拟合最坏误差低于约 0.03%；它补偿的是
+FFT 栅栏损失，不代替整机的 mV/code 标定和模拟频响校准。
+
+因此幅值路径可以概括为：
+
+```text
+ADC code -> Q15 Hann -> block-floating FFT -> |X[k-1:k+1]|
+         -> 三点栅栏损失修正 -> 还原 block exponent
+         -> 补偿 Hann 相干增益 -> 正弦峰值 amplitude_code
+```
+
+### 亚 bin 频率为什么能精确到整数 Hz
+
+整数 FFT bin 只负责粗定位。2 MSPS、4096 点条件下：
+
+```text
+delta_f = Fs/N = 2,000,000/4096 = 488.28125 Hz
+f_bin(k) = k*488.28125 Hz
+```
+
+例如 50 kHz 位于 bin 102.4。频谱搜索先找到整数峰 `k=102`，再使用上面的 Hann
+三点公式得到约 `delta=+0.4`，最终频率为：
+
+```text
+f_est = (k+delta)*Fs/N
+```
+
+为了避免浮点运算，RTL 把 `k+delta` 保存为 Q15，并利用
+`488.28125=15625/32` 做精确的定点换算：
+
+```text
+frequency_hz = round(((k+delta)_q15 * 15625) / 2^20)
+```
+
+Q1.15 偏移本身对应约 `488.28125/32768=0.0149 Hz` 的数值步进，输出寄存器
+最终舍入为整数 Hz。这里的 0.0149 Hz 只是定点计算分辨率，不代表整机绝对误差
+达到 0.0149 Hz；真实准确度还受 2 MHz 采样时钟误差、噪声、量化、多音主瓣
+叠加和模拟前端影响。题目要求为 1 kHz，当前算法给这些误差留下了充足裕量。
+
+10 kHz 是一个特别的下边界：`10000/488.28125=20.48`，最大整数谱点可能是
+bin 20。搜索若从 bin 21 开始，会丢掉真正主峰并误选旁瓣，所以当前搜索范围从
+bin 20 开始，而最终测量带仍按插值频率判定为 10--500 kHz。
+
+三峰寄存器按功率从强到弱排序，并不按频率排序。峰值功率低于最强峰的
+`1/2048` 时不计入 `component_count`，对应幅值门限约 2.21%。单音测试中
+`peak1/peak2_bin` 仍可能保留噪声局部峰；只有 `component_count` 指示的前若干
+个峰及其幅值才有效。`fundamental_frequency_hz` 取所有合格分量中频率最低者。
+
+### 精度验证与源码对应关系
+
+自动回归包含五个完整 4096 点帧：500 kHz 单音、三音组合、10 kHz 下边界、
+13 kHz 单音和偏离整数 bin 0.4 格的 300 kHz 单音。当前 XSim 结果为：
+
+| 输入 | 期望峰值 code | RTL 频率 | RTL 峰值 code |
+|---|---:|---:|---:|
+| 500 kHz 单音 | 800 | 500000 Hz | 800 |
+| 100.098/250/450.195 kHz 三音 | 1000/300/120 | 100098 Hz（基波） | 1000/300/120 |
+| 10 kHz 单音 | 700 | 10000 Hz | 700 |
+| 13 kHz 单音 | 650 | 13000 Hz | 650 |
+| 300 kHz、偏移 0.4 bin | 900 | 300000 Hz | 900 |
+
+板测 50 kHz、400 mVpp 得到 `peak0_bin=102`、插值频率 50000 Hz、幅值约
+6330 code；全频域扫频时幅值波动约在 +/-100 code 内。绝对电压仍应以 ADC
+BNC 端实测 Vpp 建立 `mV/code`，并在需要时用 `K(f)` 表补偿模拟前端频响。
+
+主要实现文件如下：
+
+- `g_fft_input_stream.v`、`g_hann_rom.v`：Q15 对称 Hann 加窗；
+- `g_spectrum_analyzer.v`：功率、局部峰、三峰排序、门限和结果调度；
+- `g_integer_sqrt.v`、`g_fractional_divider.v`：三点幅度与 Q1.15 偏移；
+- `g_hann_peak_refiner.v`：频率偏移及 Hann 栅栏损失多项式；
+- `g_hann_amplitude_scaler.v`：块浮点指数和相干增益恢复；
+- `generate_g_fft_spectrum_vectors.m`、`tb_g_fft_spectrum.sv`：位真向量和五帧自检。
+
 自检命令为：
 
 ```powershell
@@ -156,9 +295,38 @@ powershell -ExecutionPolicy Bypass -File scripts/run_g_fft_spectrum_xsim.ps1
 powershell -ExecutionPolicy Bypass -File scripts/run_g_board_ila_build.ps1
 ```
 
-当前板级实现资源为 5898 LUT、11420 FF、71 BRAM tile、23 DSP；200 MHz 最终
-WNS +0.184 ns、WHS +0.034 ns，DRC/CDC Critical 和未约束路径均为 0。新版 ILA
-操作与校准说明见 `hardware/notes/fft_spectrum_ila_test_guide.md`。
+当前校准/UART板测镜像已通过正式门禁：6521 LUT、11906 FF、29 BRAM tile、
+35 DSP，200 MHz WNS `+0.016 ns`、WHS `+0.034 ns`，TNS/THS均为0；DRC无
+Error/Critical Warning，未约束内部端点为0。`.bit/.ltx` 位于
+`results/board_ila/`。由于建立时间裕量较小，任何RTL或ILA改动后都必须重新
+执行完整实现。上一版FFT内部ILA说明保存在
+`hardware/notes/fft_spectrum_ila_test_guide.md`；
+当前校准/UART精简ILA以 `hardware/notes/tjc_calibration_board_test_guide.md` 为准。
+
+### 电压校准与 UART 物理量接口
+
+`g_measurement_calibrator.v` 已把 FFT 输出的三个幅值码转换为可直接交给 UART 的
+物理量：三个分量按频率从低到高输出整数 Hz、峰值 uV 和 RMS uV，同时输出合成
+信号的真 RMS。增益使用 Q16.16 `uV/code`，支持 UART/Flash 直接写系数，也支持
+对已知 Vpp 单音自动平均 16 帧完成现场校准。默认系数只是由当前板测估出的临时
+值，模拟前端确定后仍须在 50 ohm 条件下正式标定。
+
+独立自检和 200 MHz 综合命令：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_g_measurement_calibrator_xsim.ps1
+powershell -ExecutionPolicy Bypass -File scripts/run_g_measurement_calibrator_synth.ps1
+```
+
+非统一相位的谐波仍可由复数 FFT 模长分离；当前端到端 Testbench 已用三个不同
+初相位覆盖这一情况。接口定义、校准公式、板级步骤、UART 字段和无串口虚拟触发
+方法见 `hardware/notes/measurement_calibration_interface.md`。
+
+TJC4827T143 已使用115200/8-N-1接入：W18为FPGA TX、W19为FPGA RX。屏幕
+发送 ASCII `C` 触发200 mVpp现场校准；板载R19/PL KEY1按下后，经20 ms消抖
+只发送一次最近测量值到 `x0/x2/x3/x4`，不做周期刷新。屏幕配置、接线安全、
+精简ILA探针和二次谐波测试步骤见
+`hardware/notes/tjc_calibration_board_test_guide.md`。
 
 在上述 XSim 脚本后增加 `-Gui` 可直接打开波形窗口。进入 Tcl Console 后执行
 `source scripts/wave_adc_frontend.tcl`、`source scripts/wave_g_fir.tcl` 或

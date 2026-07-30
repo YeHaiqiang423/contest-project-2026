@@ -31,6 +31,9 @@ module tb_g_fft_spectrum;
     wire [11:0] peak0_bin;
     wire [11:0] peak1_bin;
     wire [11:0] peak2_bin;
+    wire [19:0] peak0_frequency_hz;
+    wire [19:0] peak1_frequency_hz;
+    wire [19:0] peak2_frequency_hz;
     wire [32:0] peak0_power;
     wire [32:0] peak1_power;
     wire [32:0] peak2_power;
@@ -38,6 +41,19 @@ module tb_g_fft_spectrum;
     wire [15:0] peak1_amplitude_code;
     wire [15:0] peak2_amplitude_code;
     wire [4:0] result_block_exponent;
+    wire measurement_valid;
+    wire measurement_overrun;
+    wire [1:0] measurement_component_count;
+    wire [19:0] component0_frequency_hz;
+    wire [19:0] component1_frequency_hz;
+    wire [19:0] component2_frequency_hz;
+    wire [23:0] component0_amplitude_uv;
+    wire [23:0] component1_amplitude_uv;
+    wire [23:0] component2_amplitude_uv;
+    wire [23:0] component0_rms_uv;
+    wire [23:0] component1_rms_uv;
+    wire [23:0] component2_rms_uv;
+    wire [23:0] total_true_rms_uv;
 
     integer vector_file;
     integer scan_count;
@@ -46,6 +62,7 @@ module tb_g_fft_spectrum;
     integer output_count = 0;
     integer spectrum_count = 0;
     integer result_count = 0;
+    integer measurement_count = 0;
     integer errors = 0;
     integer output_frame_exponent = -1;
     string vector_path;
@@ -74,12 +91,48 @@ module tb_g_fft_spectrum;
         .fundamental_bin(fundamental_bin),
         .fundamental_frequency_hz(fundamental_frequency_hz),
         .peak0_bin(peak0_bin), .peak1_bin(peak1_bin), .peak2_bin(peak2_bin),
+        .peak0_frequency_hz(peak0_frequency_hz),
+        .peak1_frequency_hz(peak1_frequency_hz),
+        .peak2_frequency_hz(peak2_frequency_hz),
         .peak0_power(peak0_power), .peak1_power(peak1_power),
         .peak2_power(peak2_power),
         .peak0_amplitude_code(peak0_amplitude_code),
         .peak1_amplitude_code(peak1_amplitude_code),
         .peak2_amplitude_code(peak2_amplitude_code),
         .result_block_exponent(result_block_exponent)
+    );
+
+    g_measurement_calibrator #(
+        // Exact 25 uV/code makes the end-to-end golden values transparent.
+        .DEFAULT_GAIN_UV_PER_CODE_Q16(24'd1638400)
+    ) calibrator (
+        .clk(clk), .rst_n(rst_n),
+        .spectrum_results_valid(results_valid),
+        .component_count_in(component_count),
+        .peak0_frequency_hz(peak0_frequency_hz),
+        .peak1_frequency_hz(peak1_frequency_hz),
+        .peak2_frequency_hz(peak2_frequency_hz),
+        .peak0_amplitude_code(peak0_amplitude_code),
+        .peak1_amplitude_code(peak1_amplitude_code),
+        .peak2_amplitude_code(peak2_amplitude_code),
+        .gain_write(1'b0), .gain_write_q16(24'd0),
+        .calibrate_start(1'b0),
+        .calibration_reference_vpp_uv(24'd0),
+        .active_gain_q16(), .calibration_busy(),
+        .calibration_done(), .calibration_error(),
+        .measurement_valid(measurement_valid),
+        .measurement_overrun(measurement_overrun),
+        .component_count(measurement_component_count),
+        .component0_frequency_hz(component0_frequency_hz),
+        .component1_frequency_hz(component1_frequency_hz),
+        .component2_frequency_hz(component2_frequency_hz),
+        .component0_amplitude_uv(component0_amplitude_uv),
+        .component1_amplitude_uv(component1_amplitude_uv),
+        .component2_amplitude_uv(component2_amplitude_uv),
+        .component0_rms_uv(component0_rms_uv),
+        .component1_rms_uv(component1_rms_uv),
+        .component2_rms_uv(component2_rms_uv),
+        .total_true_rms_uv(total_true_rms_uv)
     );
 
     always #2.5 clk = ~clk;
@@ -145,6 +198,8 @@ module tb_g_fft_spectrum;
                 end
                 check_close(fundamental_frequency_hz, 500000, 1,
                     "single-tone frequency");
+                check_close(peak0_frequency_hz, 500000, 1,
+                    "single-tone component frequency");
                 check_close(peak0_amplitude_code, 800, 20,
                     "single-tone amplitude");
             end else if (result_count == 1) begin
@@ -156,6 +211,12 @@ module tb_g_fft_spectrum;
                 end
                 check_close(fundamental_frequency_hz, 100098, 1,
                     "three-tone fundamental frequency");
+                check_close(peak0_frequency_hz, 100098, 1,
+                    "three-tone peak0 frequency");
+                check_close(peak1_frequency_hz, 250000, 1,
+                    "three-tone peak1 frequency");
+                check_close(peak2_frequency_hz, 450195, 1,
+                    "three-tone peak2 frequency");
                 check_close(peak0_amplitude_code, 1000, 25,
                     "three-tone peak0 amplitude");
                 check_close(peak1_amplitude_code, 300, 20,
@@ -170,6 +231,8 @@ module tb_g_fft_spectrum;
                 end
                 check_close(fundamental_frequency_hz, 10000, 50,
                     "10 kHz refined frequency");
+                check_close(peak0_frequency_hz, 10000, 50,
+                    "10 kHz component frequency");
                 check_close(peak0_amplitude_code, 700, 20,
                     "10 kHz corrected amplitude");
             end else if (result_count == 3) begin
@@ -180,6 +243,8 @@ module tb_g_fft_spectrum;
                 end
                 check_close(fundamental_frequency_hz, 13000, 50,
                     "13 kHz refined frequency");
+                check_close(peak0_frequency_hz, 13000, 50,
+                    "13 kHz component frequency");
                 check_close(peak0_amplitude_code, 650, 20,
                     "13 kHz corrected amplitude");
             end else if (result_count == 4) begin
@@ -190,6 +255,8 @@ module tb_g_fft_spectrum;
                 end
                 check_close(fundamental_frequency_hz, 300000, 50,
                     "300 kHz refined frequency");
+                check_close(peak0_frequency_hz, 300000, 50,
+                    "300 kHz component frequency");
                 check_close(peak0_amplitude_code, 900, 25,
                     "300 kHz corrected amplitude");
             end else begin
@@ -197,6 +264,70 @@ module tb_g_fft_spectrum;
                 $error("Unexpected extra result frame");
             end
             result_count = result_count+1;
+        end
+
+        if (measurement_valid) begin
+            if ($isunknown({measurement_component_count,
+                    component0_frequency_hz, component1_frequency_hz,
+                    component2_frequency_hz, component0_amplitude_uv,
+                    component1_amplitude_uv, component2_amplitude_uv,
+                    component0_rms_uv, component1_rms_uv,
+                    component2_rms_uv, total_true_rms_uv})) begin
+                errors = errors+1;
+                $error("Calibrated measurement contains X/Z");
+            end
+            if (measurement_count == 0) begin
+                if (measurement_component_count != 1 ||
+                        component0_frequency_hz != 500000)
+                    errors = errors+1;
+                check_close(component0_amplitude_uv, 20000, 500,
+                    "500 kHz calibrated peak");
+                check_close(component0_rms_uv, 14142, 500,
+                    "500 kHz component rms");
+                check_close(total_true_rms_uv, 14125, 500,
+                    "500 kHz total rms");
+            end else if (measurement_count == 1) begin
+                if (measurement_component_count != 3 ||
+                        component0_frequency_hz != 100098 ||
+                        component1_frequency_hz != 250000 ||
+                        component2_frequency_hz != 450195) begin
+                    errors = errors+1;
+                    $error("Different-phase three-tone frequency order mismatch");
+                end
+                check_close(component0_amplitude_uv, 25000, 625,
+                    "three-tone component0 peak");
+                check_close(component1_amplitude_uv, 7500, 500,
+                    "three-tone component1 peak");
+                check_close(component2_amplitude_uv, 3000, 375,
+                    "three-tone component2 peak");
+                check_close(component0_rms_uv, 17678, 625,
+                    "three-tone component0 rms");
+                check_close(component1_rms_uv, 5303, 500,
+                    "three-tone component1 rms");
+                check_close(component2_rms_uv, 2121, 375,
+                    "three-tone component2 rms");
+                check_close(total_true_rms_uv, 18575, 750,
+                    "different-phase three-tone total true rms");
+            end else if (measurement_count == 2) begin
+                check_close(component0_frequency_hz, 10000, 50,
+                    "10 kHz calibrated frequency");
+                check_close(component0_amplitude_uv, 17500, 500,
+                    "10 kHz calibrated peak");
+            end else if (measurement_count == 3) begin
+                check_close(component0_frequency_hz, 13000, 50,
+                    "13 kHz calibrated frequency");
+                check_close(component0_amplitude_uv, 16250, 500,
+                    "13 kHz calibrated peak");
+            end else if (measurement_count == 4) begin
+                check_close(component0_frequency_hz, 300000, 50,
+                    "300 kHz calibrated frequency");
+                check_close(component0_amplitude_uv, 22500, 625,
+                    "300 kHz calibrated peak");
+            end else begin
+                errors = errors+1;
+                $error("Unexpected calibrated measurement frame");
+            end
+            measurement_count = measurement_count+1;
         end
     end
 
@@ -235,7 +366,7 @@ module tb_g_fft_spectrum;
         input_last = 1'b0;
         $fclose(vector_file);
 
-        wait (result_count == 5);
+        wait (result_count == 5 && measurement_count == 5);
         repeat (10) @(posedge clk);
         if (input_count != 5*NFFT || output_count != 5*NFFT ||
                 spectrum_count != 5*NFFT) begin
@@ -252,8 +383,12 @@ module tb_g_fft_spectrum;
             errors = errors+1;
             $error("Expected Non-Realtime input-wait event was not observed");
         end
+        if (measurement_overrun) begin
+            errors = errors+1;
+            $error("Calibrated measurement overrun");
+        end
         if (errors == 0)
-            $display("PASS: five FFT frames verify 10 kHz boundary, fractional frequency and Hann amplitude correction");
+            $display("PASS: five FFT frames verify different-phase separation, refined frequency, Hann amplitude correction and calibrated peak/RMS outputs");
         else
             $fatal(1, "FAIL: %0d FFT/spectrum errors", errors);
         $finish;

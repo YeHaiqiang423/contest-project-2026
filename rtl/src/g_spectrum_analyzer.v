@@ -34,6 +34,9 @@ module g_spectrum_analyzer #(
     output reg  [11:0]        peak0_bin,
     output reg  [11:0]        peak1_bin,
     output reg  [11:0]        peak2_bin,
+    output reg  [19:0]        peak0_frequency_hz,
+    output reg  [19:0]        peak1_frequency_hz,
+    output reg  [19:0]        peak2_frequency_hz,
     output reg  [32:0]        peak0_power,
     output reg  [32:0]        peak1_power,
     output reg  [32:0]        peak2_power,
@@ -79,9 +82,6 @@ module g_spectrum_analyzer #(
     reg [32:0] peak0_right_power;
     reg [32:0] peak1_right_power;
     reg [32:0] peak2_right_power;
-    reg [19:0] peak0_frequency_hz;
-    reg [19:0] peak1_frequency_hz;
-    reg [19:0] peak2_frequency_hz;
     reg [4:0] result_state;
     reg [1:0] refine_index;
     reg refine_start;
