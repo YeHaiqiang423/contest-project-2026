@@ -70,6 +70,7 @@ module g_tjc_display_uart #(
     localparam [3:0] TX_RAW = 4'd5;
     localparam [3:0] TX_WAIT_FD = 4'd6;
     localparam [3:0] TX_CLEAR = 4'd7;
+    localparam [3:0] TX_COPY_WAIT = 4'd8;
 
     wire [7:0] rx_data;
     wire rx_valid;
@@ -136,11 +137,12 @@ module g_tjc_display_uart #(
         spectrum_display_ready : waveform_display_ready;
     assign all_bcd_valid = bcd0_valid && bcd1_valid && bcd2_valid &&
         bcd3_valid && bcd4_valid && bcd5_valid && bcd6_valid && bcd7_valid;
-    // Frequency values are converted from Hz to 10 Hz units by omitting the
-    // final BCD digit.  With the TJC virtual-float decimals set to two this
-    // displays kHz as, for example, 50000 Hz -> 50.00 kHz.
+    // Frequency fields retain integer hertz and use three TJC decimal places,
+    // so 500000 displays as 500.000 kHz.  Voltage fields are rounded from
+    // microvolts to 10 uV units and use two decimal places, so 24680 displays
+    // as 246.80 mV.
     assign selected_last_digit = (numeric_field == 4'd3 ||
-        numeric_field == 4'd5 || numeric_field == 4'd7) ? 4'd6 : 4'd4;
+        numeric_field == 4'd5 || numeric_field == 4'd7) ? 4'd7 : 4'd6;
     assign selected_digit_count = selected_last_digit-digit_start+1'b1;
     assign numeric_final_index = 5'd7+selected_digit_count+5'd2;
 
@@ -155,35 +157,35 @@ module g_tjc_display_uart #(
 
     g_binary_to_bcd vpp_bcd (
         .clk(clk), .rst_n(rst_n), .start(bcd_start),
-        .binary({1'b0, total_vpp_uv}+25'd500), .busy(),
+        .binary({1'b0, total_vpp_uv}+25'd5), .busy(),
         .valid(bcd0_valid), .bcd(bcd0));
     g_binary_to_bcd rms_bcd (
         .clk(clk), .rst_n(rst_n), .start(bcd_start),
-        .binary({1'b0, total_true_rms_uv}+25'd500), .busy(),
+        .binary({1'b0, total_true_rms_uv}+25'd5), .busy(),
         .valid(bcd1_valid), .bcd(bcd1));
     g_binary_to_bcd amplitude0_bcd (
         .clk(clk), .rst_n(rst_n), .start(bcd_start),
-        .binary({1'b0, component0_amplitude_uv}+25'd500), .busy(),
+        .binary({1'b0, component0_amplitude_uv}+25'd5), .busy(),
         .valid(bcd2_valid), .bcd(bcd2));
     g_binary_to_bcd frequency0_bcd (
         .clk(clk), .rst_n(rst_n), .start(bcd_start),
-        .binary({5'd0, component0_frequency_hz}+25'd5), .busy(),
+        .binary({5'd0, component0_frequency_hz}), .busy(),
         .valid(bcd3_valid), .bcd(bcd3));
     g_binary_to_bcd amplitude1_bcd (
         .clk(clk), .rst_n(rst_n), .start(bcd_start),
-        .binary({1'b0, component1_amplitude_uv}+25'd500), .busy(),
+        .binary({1'b0, component1_amplitude_uv}+25'd5), .busy(),
         .valid(bcd4_valid), .bcd(bcd4));
     g_binary_to_bcd frequency1_bcd (
         .clk(clk), .rst_n(rst_n), .start(bcd_start),
-        .binary({5'd0, component1_frequency_hz}+25'd5), .busy(),
+        .binary({5'd0, component1_frequency_hz}), .busy(),
         .valid(bcd5_valid), .bcd(bcd5));
     g_binary_to_bcd amplitude2_bcd (
         .clk(clk), .rst_n(rst_n), .start(bcd_start),
-        .binary({1'b0, component2_amplitude_uv}+25'd500), .busy(),
+        .binary({1'b0, component2_amplitude_uv}+25'd5), .busy(),
         .valid(bcd6_valid), .bcd(bcd6));
     g_binary_to_bcd frequency2_bcd (
         .clk(clk), .rst_n(rst_n), .start(bcd_start),
-        .binary({5'd0, component2_frequency_hz}+25'd5), .busy(),
+        .binary({5'd0, component2_frequency_hz}), .busy(),
         .valid(bcd7_valid), .bcd(bcd7));
 
     function [31:0] selected_bcd;
@@ -228,7 +230,7 @@ module g_tjc_display_uart #(
         reg [3:0] final_digit;
         begin
             final_digit = (field_number == 4'd3 || field_number == 4'd5 ||
-                field_number == 4'd7) ? 4'd6 : 4'd4;
+                field_number == 4'd7) ? 4'd7 : 4'd6;
             if (decimal_digit(field_number, 0) != "0") first_digit = 0;
             else if (decimal_digit(field_number, 1) != "0") first_digit = 1;
             else if (decimal_digit(field_number, 2) != "0") first_digit = 2;
@@ -236,6 +238,7 @@ module g_tjc_display_uart #(
             else if (decimal_digit(field_number, 4) != "0") first_digit = 4;
             else if (final_digit >= 5 && decimal_digit(field_number, 5) != "0") first_digit = 5;
             else if (final_digit >= 6 && decimal_digit(field_number, 6) != "0") first_digit = 6;
+            else if (final_digit >= 7 && decimal_digit(field_number, 7) != "0") first_digit = 7;
             else first_digit = final_digit;
         end
     endfunction
@@ -248,7 +251,7 @@ module g_tjc_display_uart #(
         reg [3:0] count;
         begin
             final_number = (field_number == 4'd3 || field_number == 4'd5 ||
-                field_number == 4'd7) ? 4'd6 : 4'd4;
+                field_number == 4'd7) ? 4'd7 : 4'd6;
             count = final_number-first_number+1'b1;
             case (character_number)
                 0: numeric_character = "x";
@@ -463,7 +466,7 @@ module g_tjc_display_uart #(
                         display_read_addr <= 10'd0;
                         transfer_busy <= 1'b1;
                         request_wait_counter <= 32'd0;
-                        tx_state <= TX_COPY_PLOT;
+                        tx_state <= TX_COPY_WAIT;
                     end else if (plot_request_pending &&
                             selected_display_ready &&
                             (spectrum_mode || waveform_refresh_seen)) begin
@@ -474,7 +477,7 @@ module g_tjc_display_uart #(
                         display_read_addr <= 10'd0;
                         transfer_busy <= 1'b1;
                         request_wait_counter <= 32'd0;
-                        tx_state <= TX_COPY_PLOT;
+                        tx_state <= TX_COPY_WAIT;
                     end else if (full_request_pending ||
                             plot_request_pending) begin
                         if (request_wait_counter >=
@@ -489,6 +492,13 @@ module g_tjc_display_uart #(
                     end else begin
                         request_wait_counter <= 32'd0;
                     end
+                end
+
+                // Both display builders use synchronous BRAM reads.  The
+                // address has been stable for a full clock when this state
+                // advances to the capture state.
+                TX_COPY_WAIT: begin
+                    tx_state <= TX_COPY_PLOT;
                 end
 
                 TX_COPY_PLOT: begin
@@ -507,6 +517,7 @@ module g_tjc_display_uart #(
                     end else begin
                         copy_index <= copy_index+1'b1;
                         display_read_addr <= copy_index+1'b1;
+                        tx_state <= TX_COPY_WAIT;
                     end
                 end
 

@@ -161,9 +161,6 @@ module g_board_ila_top (
     wire uart_transparent_timeout;
     wire uart_request_overrun;
 
-    wire [31:0] ila_diagnostic_control;
-    wire fft_protocol_error;
-
     IBUF clock_input_buffer (
         .I(clk),
         .O(clk_50_ibuf)
@@ -552,61 +549,6 @@ module g_board_ila_top (
         .transfer_done(uart_transfer_done),
         .transparent_timeout_sticky(uart_transparent_timeout),
         .request_overrun(uart_request_overrun)
-    );
-
-    // In Non-Realtime mode event_data_in_channel_halt reports a permitted
-    // upstream wait state. The core pauses and the frame remains valid, so it
-    // is exposed separately but excluded from the protocol-error summary.
-    assign fft_protocol_error = fft_error_sticky[0] |
-        fft_error_sticky[1] | fft_error_sticky[2] | fft_error_sticky[4];
-
-    // Keep ILA for information that cannot be read from the screen: the first
-    // point where sample coherence is lost and the ready/valid/error health
-    // around it.  User-facing voltage/frequency values are intentionally not
-    // duplicated here.
-    assign ila_diagnostic_control[0] = adc_stream_valid;
-    assign ila_diagnostic_control[1] = debug_adc_sample_valid;
-    assign ila_diagnostic_control[2] = debug_fir_output_valid;
-    assign ila_diagnostic_control[3] = fft_valid;
-    assign ila_diagnostic_control[4] = fft_input_ready;
-    assign ila_diagnostic_control[5] = fft_last;
-    assign ila_diagnostic_control[6] = fft_output_valid;
-    assign ila_diagnostic_control[7] = fft_output_ready;
-    assign ila_diagnostic_control[8] = fft_output_last;
-    assign ila_diagnostic_control[9] = spectrum_valid;
-    assign ila_diagnostic_control[10] = spectrum_results_valid;
-    assign ila_diagnostic_control[11] = debug_frame_ready;
-    assign ila_diagnostic_control[12] = debug_fft_busy;
-    assign ila_diagnostic_control[13] = frame_done;
-    assign ila_diagnostic_control[14] = measurement_valid;
-    assign ila_diagnostic_control[15] = measurement_stable;
-    assign ila_diagnostic_control[16] = fifo_status_sync[2];
-    assign ila_diagnostic_control[17] = fifo_underflow;
-    assign ila_diagnostic_control[18] = adc_input_overrun;
-    assign ila_diagnostic_control[19] = frame_overrun;
-    assign ila_diagnostic_control[20] = scheduler_overrun;
-    assign ila_diagnostic_control[21] = fft_protocol_error;
-    assign ila_diagnostic_control[22] = measurement_overrun;
-    assign ila_diagnostic_control[23] = waveform_request_overrun;
-    assign ila_diagnostic_control[24] = spectrum_display_overrun;
-    assign ila_diagnostic_control[25] = uart_request_overrun;
-    assign ila_diagnostic_control[26] = uart_transparent_timeout;
-    assign ila_diagnostic_control[27] = uart_rx_framing_error_sticky;
-    assign ila_diagnostic_control[28] = calibration_error;
-    assign ila_diagnostic_control[29] = calibration_busy;
-    assign ila_diagnostic_control[30] = system_rst_n;
-    assign ila_diagnostic_control[31] =
-        fft_output_valid && fft_output_bin == 12'd1024;
-
-    board_ila initial_validation_ila (
-        .clk(clk_200),
-        .probe0(fifo_dout),
-        .probe1(debug_fir_output_data),
-        .probe2(fft_real),
-        .probe3(fft_output_real),
-        .probe4(fft_output_imag),
-        .probe5(fft_output_bin),
-        .probe6(ila_diagnostic_control)
     );
 
 endmodule

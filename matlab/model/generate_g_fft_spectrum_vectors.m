@@ -22,6 +22,12 @@ function generate_g_fft_spectrum_vectors()
     frame10 = round(100*cos(2*pi*100000*n/sample_rate_hz) + ...
         400*cos(2*pi*200000*n/sample_rate_hz) + ...
         500*cos(2*pi*400000*n/sample_rate_hz));
+    % 500.1 kHz is deliberately just above the contest band but inside the
+    % extended 600 kHz implementation range.  It proves that 500 kHz is no
+    % longer a special search boundary.
+    frame11 = round(800*cos(2*pi*500100*n/sample_rate_hz+0.37));
+    frame12 = round(800*cos(2*pi*600000*n/sample_rate_hz-0.53));
+    frame13 = round(700*cos(2*pi*1000*n/sample_rate_hz+0.28));
 
     windowed1 = apply_q15_hann(frame1, hann_q15);
     windowed2 = apply_q15_hann(frame2, hann_q15);
@@ -33,15 +39,20 @@ function generate_g_fft_spectrum_vectors()
     windowed8 = apply_q15_hann(frame8, hann_q15);
     windowed9 = apply_q15_hann(frame9, hann_q15);
     windowed10 = apply_q15_hann(frame10, hann_q15);
+    windowed11 = apply_q15_hann(frame11, hann_q15);
+    windowed12 = apply_q15_hann(frame12, hann_q15);
+    windowed13 = apply_q15_hann(frame13, hann_q15);
 
     project_root = fileparts(fileparts(fileparts(mfilename('fullpath'))));
     vector_dir = fullfile(project_root, 'matlab', 'vectors');
     if ~exist(vector_dir, 'dir'), mkdir(vector_dir); end
     write_decimal(fullfile(vector_dir, 'g_fft_spectrum_input.txt'), ...
         [windowed1; windowed2; windowed3; windowed4; windowed5; ...
-        windowed6; windowed7; windowed8; windowed9; windowed10]);
-    fprintf(['Generated ten 4096-point Hann-windowed FFT frames, including ' ...
-        '500 kHz phase/boundary and weak-fundamental phase regressions.\n']);
+        windowed6; windowed7; windowed8; windowed9; windowed10; windowed11; ...
+        windowed12; windowed13]);
+    fprintf(['Generated thirteen 4096-point Hann-windowed FFT frames, including ' ...
+        '1 kHz lower boundary, 500 kHz interior, 600 kHz extension and ' ...
+        'weak-fundamental phase regressions.\n']);
 end
 
 function output = apply_q15_hann(input, hann_q15)

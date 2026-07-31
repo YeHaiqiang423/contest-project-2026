@@ -304,6 +304,33 @@ module tb_g_fft_spectrum;
                     "weak-fundamental 200 kHz amplitude");
                 check_close(peak2_amplitude_code, 100, 12,
                     "weak-fundamental 100 kHz amplitude");
+            end else if (result_count == 10) begin
+                if (component_count != 1 || peak0_bin != 1024) begin
+                    errors = errors+1;
+                    $error("500.1 kHz interior peak mismatch");
+                end
+                check_close(peak0_frequency_hz, 500100, 75,
+                    "500.1 kHz interior frequency");
+                check_close(peak0_amplitude_code, 800, 30,
+                    "500.1 kHz interior amplitude");
+            end else if (result_count == 11) begin
+                if (component_count != 1 || peak0_bin != 1229) begin
+                    errors = errors+1;
+                    $error("600 kHz extension boundary peak mismatch");
+                end
+                check_close(peak0_frequency_hz, 600000, 75,
+                    "600 kHz extension frequency");
+                check_close(peak0_amplitude_code, 800, 30,
+                    "600 kHz extension amplitude");
+            end else if (result_count == 12) begin
+                if (component_count != 1 || peak0_bin != 2) begin
+                    errors = errors+1;
+                    $error("1 kHz lower-bound peak mismatch");
+                end
+                check_close(peak0_frequency_hz, 1000, 100,
+                    "1 kHz lower-bound frequency");
+                check_close(peak0_amplitude_code, 700, 40,
+                    "1 kHz lower-bound amplitude");
             end else begin
                 errors = errors+1;
                 $error("Unexpected extra result frame");
@@ -401,6 +428,33 @@ module tb_g_fft_spectrum;
                     "weak-fundamental calibrated 200 kHz peak");
                 check_close(component2_amplitude_uv, 12500, 625,
                     "weak-fundamental calibrated 400 kHz peak");
+            end else if (measurement_count == 10) begin
+                if (measurement_component_count != 1 ||
+                        component0_frequency_hz < 500025 ||
+                        component0_frequency_hz > 500175) begin
+                    errors = errors+1;
+                    $error("500.1 kHz calibrated interior mismatch");
+                end
+                check_close(component0_amplitude_uv, 20000, 750,
+                    "500.1 kHz calibrated interior peak");
+            end else if (measurement_count == 11) begin
+                if (measurement_component_count != 1 ||
+                        component0_frequency_hz < 599925 ||
+                        component0_frequency_hz > 600000) begin
+                    errors = errors+1;
+                    $error("600 kHz calibrated extension mismatch");
+                end
+                check_close(component0_amplitude_uv, 20000, 750,
+                    "600 kHz calibrated extension peak");
+            end else if (measurement_count == 12) begin
+                if (measurement_component_count != 1 ||
+                        component0_frequency_hz < 900 ||
+                        component0_frequency_hz > 1100) begin
+                    errors = errors+1;
+                    $error("1 kHz calibrated lower-bound mismatch");
+                end
+                check_close(component0_amplitude_uv, 17500, 1000,
+                    "1 kHz calibrated lower-bound peak");
             end else begin
                 errors = errors+1;
                 $error("Unexpected calibrated measurement frame");
@@ -444,10 +498,10 @@ module tb_g_fft_spectrum;
         input_last = 1'b0;
         $fclose(vector_file);
 
-        wait (result_count == 10 && measurement_count == 10);
+        wait (result_count == 13 && measurement_count == 13);
         repeat (10) @(posedge clk);
-        if (input_count != 10*NFFT || output_count != 10*NFFT ||
-                spectrum_count != 10*NFFT) begin
+        if (input_count != 13*NFFT || output_count != 13*NFFT ||
+                spectrum_count != 13*NFFT) begin
             errors = errors+1;
             $error("Frame counts input=%0d output=%0d spectrum=%0d",
                 input_count, output_count, spectrum_count);
@@ -466,7 +520,7 @@ module tb_g_fft_spectrum;
             $error("Calibrated measurement overrun");
         end
         if (errors == 0)
-            $display("PASS: ten FFT frames verify 500 kHz boundary phases, weak-fundamental phase separation, refined frequency and calibrated amplitudes");
+            $display("PASS: thirteen FFT frames verify 1 kHz lower boundary, 500 kHz interior, 600 kHz extension, phases, weak-fundamental separation and calibrated amplitudes");
         else
             $fatal(1, "FAIL: %0d FFT/spectrum errors", errors);
         $finish;

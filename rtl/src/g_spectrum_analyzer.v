@@ -1,13 +1,17 @@
 `timescale 1ns/1ps
 
 // Streaming post-processor for a natural-order 4096-point real FFT.
-// It searches 10 kHz..500 kHz, retains the three strongest local peaks and
-// reports an approximate Hann-corrected peak amplitude in ADC codes.
+// It searches 1 kHz..600 kHz, retains the three strongest local peaks and
+// reports an approximate Hann-corrected peak amplitude in ADC codes.  The
+// contest guarantee remains 500 kHz; the extra 100 kHz keeps that point away
+// from the peak-search boundary and provides a useful demonstration margin.
 module g_spectrum_analyzer #(
-    // 10 kHz is bin 20.48. The nearest/largest bin can therefore be bin 20;
-    // starting at 21 discards the real main-lobe peak at the lower boundary.
-    parameter integer MIN_BIN = 20,
-    parameter integer MAX_BIN = 1024,
+    // 1 kHz is bin 2.048.  Bin 1 remains available as the left interpolation
+    // guard while DC itself is excluded from peak selection.
+    parameter integer MIN_BIN = 2,
+    parameter integer MAX_BIN = 1229,
+    parameter integer MIN_FREQUENCY_HZ = 1000,
+    parameter integer MAX_FREQUENCY_HZ = 600000,
     // Power threshold = strongest_power / 2^PEAK_POWER_SHIFT.
     // 11 corresponds to an amplitude ratio of about 2.21 percent.
     parameter integer PEAK_POWER_SHIFT = 11
@@ -87,6 +91,7 @@ module g_spectrum_analyzer #(
     reg refine_start;
     reg signed [28:0] frequency_bin_q15;
     (* use_dsp = "yes" *) reg signed [43:0] frequency_product;
+    reg signed [23:0] frequency_hz_rounded;
     reg qualified0_latched;
     reg qualified1_latched;
     reg qualified2_latched;
@@ -105,10 +110,11 @@ module g_spectrum_analyzer #(
     wire candidate1_qualified;
     wire candidate2_qualified;
     wire [11:0] fundamental_latched01;
+    wire signed [23:0] rounded_frequency_hz;
 
     assign fft_ready = 1'b1;
     // MAX_BIN is a measurement boundary, not an ordinary interior bin.  A
-    // tone fractionally above bin 1024 may still be a valid nominal 500 kHz
+    // tone fractionally above bin 1229 may still be a valid nominal 600 kHz
     // input because of source/sample-clock tolerance.  Accept a rising peak
     // at the boundary and retain bin 1025 as its interpolation guard sample;
     // interior bins still require a strict falling right neighbor.
@@ -125,12 +131,35 @@ module g_spectrum_analyzer #(
         candidate2_power >= threshold_power;
     assign fundamental_latched01 = qualified1_latched &&
         (peak1_bin < peak0_bin) ? peak1_bin : peak0_bin;
+    // frequency_product is positive in the legal positive-frequency search
+    // band.  Rounding after a Q20 multiply therefore needs only the retained
+    // high word plus the discarded half-LSB bit, not a 44-bit carry chain.
+    assign rounded_frequency_hz =
+        $signed(frequency_product[43:20])+
+        $signed({23'd0, frequency_product[19]});
     assign refine_left_power = (refine_index == 2'd0) ? peak0_left_power :
         ((refine_index == 2'd1) ? peak1_left_power : peak2_left_power);
     assign refine_center_power = (refine_index == 2'd0) ? peak0_power :
         ((refine_index == 2'd1) ? peak1_power : peak2_power);
     assign refine_right_power = (refine_index == 2'd0) ? peak0_right_power :
         ((refine_index == 2'd1) ? peak1_right_power : peak2_right_power);
+
+    // A peak at the first/last legal bin still uses its guard sample for
+    // sub-bin interpolation.  Noise and independent source/sample clocks can
+    // put the estimate a few hertz outside the declared 1..600 kHz band.
+    // Saturate the reported value so downstream range checks do not reject a
+    // legal boundary tone whose displayed value still rounds to 500.00 kHz.
+    function [19:0] clamp_frequency_hz;
+        input signed [23:0] frequency_hz;
+        begin
+            if (frequency_hz < MIN_FREQUENCY_HZ)
+                clamp_frequency_hz = MIN_FREQUENCY_HZ;
+            else if (frequency_hz > MAX_FREQUENCY_HZ)
+                clamp_frequency_hz = MAX_FREQUENCY_HZ;
+            else
+                clamp_frequency_hz = frequency_hz[19:0];
+        end
+    endfunction
 
     g_hann_peak_refiner peak_refiner (
         .clk(clk), .rst_n(rst_n), .start(refine_start),
@@ -294,6 +323,7 @@ module g_spectrum_analyzer #(
             refine_start <= 1'b0;
             frequency_bin_q15 <= 29'sd0;
             frequency_product <= 44'sd0;
+            frequency_hz_rounded <= 24'sd0;
             qualified0_latched <= 1'b0;
             qualified1_latched <= 1'b0;
             qualified2_latched <= 1'b0;
@@ -347,11 +377,12 @@ module g_spectrum_analyzer #(
                 frequency_product <= frequency_bin_q15*15'sd15625;
                 result_state <= 5'd6;
             end else if (result_state == 5'd6) begin
-                peak0_frequency_hz <=
-                    (frequency_product+44'sd524288) >>> 20;
+                frequency_hz_rounded <= rounded_frequency_hz;
                 refine_index <= 2'd1;
                 result_state <= 5'd7;
             end else if (result_state == 5'd7) begin
+                peak0_frequency_hz <=
+                    clamp_frequency_hz(frequency_hz_rounded);
                 refine_start <= 1'b1;
                 result_state <= 5'd8;
             end else if (result_state == 5'd8 && refine_valid) begin
@@ -364,11 +395,12 @@ module g_spectrum_analyzer #(
                 frequency_product <= frequency_bin_q15*15'sd15625;
                 result_state <= 5'd10;
             end else if (result_state == 5'd10) begin
-                peak1_frequency_hz <=
-                    (frequency_product+44'sd524288) >>> 20;
+                frequency_hz_rounded <= rounded_frequency_hz;
                 refine_index <= 2'd2;
                 result_state <= 5'd11;
             end else if (result_state == 5'd11) begin
+                peak1_frequency_hz <=
+                    clamp_frequency_hz(frequency_hz_rounded);
                 refine_start <= 1'b1;
                 result_state <= 5'd12;
             end else if (result_state == 5'd12 && refine_valid) begin
@@ -381,10 +413,13 @@ module g_spectrum_analyzer #(
                 frequency_product <= frequency_bin_q15*15'sd15625;
                 result_state <= 5'd14;
             end else if (result_state == 5'd14) begin
-                peak2_frequency_hz <=
-                    (frequency_product+44'sd524288) >>> 20;
+                frequency_hz_rounded <= rounded_frequency_hz;
                 result_state <= 5'd15;
             end else if (result_state == 5'd15) begin
+                peak2_frequency_hz <=
+                    clamp_frequency_hz(frequency_hz_rounded);
+                result_state <= 5'd16;
+            end else if (result_state == 5'd16) begin
                 if (!qualified0_latched)
                     fundamental_frequency_hz <= 20'd0;
                 else if (fundamental_bin == peak0_bin)

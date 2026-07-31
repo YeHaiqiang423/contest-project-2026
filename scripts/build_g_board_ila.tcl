@@ -51,32 +51,12 @@ set_property -dict [list \
     CONFIG.aresetn {true} \
     CONFIG.target_clock_frequency {200}] [get_ips g_fft_4096_ip]
 generate_target all [get_ips g_fft_4096_ip]
-if {[llength [get_runs -quiet g_fft_4096_ip_synth_1]] == 0} {
-    create_ip_run [get_files g_fft_4096_ip.xci]
-}
-launch_runs g_fft_4096_ip_synth_1 -jobs 2
-wait_on_run g_fft_4096_ip_synth_1
+# Synthesize the generated FFT sources in the parent run.  This keeps the
+# batch flow single-process and avoids Windows Script Host/ISEWrap failures
+# that can strand a launch_runs OOC child before Vivado sees any RTL.
+set_property generate_synth_checkpoint false \
+    [get_files g_fft_4096_ip.xci]
 
-create_ip -name ila -vendor xilinx.com -library ip -module_name board_ila
-set_property -dict [list \
-    CONFIG.C_NUM_OF_PROBES {7} \
-    CONFIG.C_PROBE0_WIDTH {14} \
-    CONFIG.C_PROBE1_WIDTH {16} \
-    CONFIG.C_PROBE2_WIDTH {16} \
-    CONFIG.C_PROBE3_WIDTH {16} \
-    CONFIG.C_PROBE4_WIDTH {16} \
-    CONFIG.C_PROBE5_WIDTH {12} \
-    CONFIG.C_PROBE6_WIDTH {32} \
-    CONFIG.C_DATA_DEPTH {8192} \
-    CONFIG.C_INPUT_PIPE_STAGES {2} \
-    CONFIG.C_ADV_TRIGGER {false} \
-    CONFIG.C_EN_STRG_QUAL {1}] [get_ips board_ila]
-generate_target all [get_ips board_ila]
-if {[llength [get_runs -quiet board_ila_synth_1]] == 0} {
-    create_ip_run [get_files board_ila.xci]
-}
-launch_runs board_ila_synth_1 -jobs 2
-wait_on_run board_ila_synth_1
 update_compile_order -fileset sources_1
 
 synth_design -top g_board_ila_top -part xc7z020clg400-2
@@ -106,9 +86,8 @@ set worst_setup_path [get_timing_paths -delay_type max -max_paths 1]
 set worst_hold_path [get_timing_paths -delay_type min -max_paths 1]
 set setup_slack [get_property SLACK $worst_setup_path]
 set hold_slack [get_property SLACK $worst_hold_path]
-set accepted_setup_waiver_ns -0.125
-if {$setup_slack < $accepted_setup_waiver_ns} {
-    error "BITSTREAM_GATE: setup slack $setup_slack ns is below the accepted $accepted_setup_waiver_ns ns board-test waiver"
+if {$setup_slack < 0.0} {
+    error "BITSTREAM_GATE: negative setup slack $setup_slack ns"
 }
 if {$hold_slack < 0.0} {
     error "BITSTREAM_GATE: negative hold slack $hold_slack ns"
@@ -146,8 +125,7 @@ if {[regexp {\|[^|]+\|[ \t]*(Error|Critical Warning)[ \t]*\|} $drc_text]} {
     error "BITSTREAM_GATE: report_drc contains Error or Critical Warning violations"
 }
 
-write_bitstream -force [file join $output_dir g_board_ila.bit]
-write_debug_probes -force [file join $output_dir g_board_ila.ltx]
+write_bitstream -force [file join $output_dir g_board_release.bit]
 
 set manifest [open [file join $output_dir build_manifest.txt] w]
 puts $manifest "Vivado: [version -short]"
@@ -159,24 +137,22 @@ puts $manifest "ADC data/return clock IOSTANDARD: HSTL_II_18"
 puts $manifest "Bank 35 INTERNAL_VREF: 0.9 V"
 puts $manifest "FFT: 4096-point natural-order 16-bit block floating point"
 puts $manifest "FFT throttle scheme: Non-Realtime"
-puts $manifest "Spectrum band: bins 20..1024 (10 kHz..500 kHz at 2 MSPS)"
+puts $manifest "Spectrum band: bins 2..1229 (1 kHz..600 kHz at 2 MSPS; contest guarantee to 500 kHz)"
+puts $manifest "Time-domain history: 65536 post-FIR samples, supports one/three periods down to 1 kHz"
 puts $manifest "UART: W18 TX / W19 RX, LVCMOS33, 115200 8-N-1"
 puts $manifest "Send button: PL KEY1 R19, active low, 20 ms debounce"
 puts $manifest "Screen: TJC8048X270_11, one 800x256 waveform component s0"
 puts $manifest "Screen commands: C(0x43) calibrate, 1(0x31), 3(0x33), S(0x53) spectrum"
 puts $manifest "Screen transfer: cle s0.id,0 then x0..x7 plus addt s0.id,0,800 with FE/FD handshake"
-puts $manifest "Screen frequency format: integer Hz/10, configure x3/x5/x7 for 2 decimal places in kHz"
-puts $manifest "ILA probes: 7 diagnostic-only raw/FIR/FFT data and compact health, depth 8192"
+puts $manifest "Screen voltage format: 10 uV/unit, configure x0/x1/x2/x4/x6 for 2 decimal places in mV"
+puts $manifest "Screen frequency format: 1 Hz/unit, configure x3/x5/x7 for 3 decimal places in kHz"
+puts $manifest "ILA: disabled; release bitstream contains no debug core and requires no .ltx file"
 puts $manifest "Setup slack: $setup_slack ns"
-if {$setup_slack >= 0.0} {
-    puts $manifest "Setup status: timing met; $accepted_setup_waiver_ns ns temporary board-test waiver unused"
-} else {
-    puts $manifest "Setup status: accepted temporary board-test waiver to $accepted_setup_waiver_ns ns; negative slack is not timing closure"
-}
+puts $manifest "Setup status: timing met"
 puts $manifest "Hold slack: $hold_slack ns"
 puts $manifest "Unconstrained paths: $unconstrained_count"
 puts $manifest "Known limitation: ADC CLKOUT L20 uses CLOCK_DEDICATED_ROUTE FALSE."
 puts $manifest "Known limitation: TI recommends external-clock CMOS capture above 150 MSPS."
 close $manifest
 
-puts "BOARD_ILA_BUILD_PASS: bitstream and probes written to $output_dir"
+puts "BOARD_RELEASE_BUILD_PASS: no-ILA bitstream written to $output_dir"

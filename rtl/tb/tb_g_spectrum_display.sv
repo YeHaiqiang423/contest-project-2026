@@ -31,13 +31,15 @@ module tb_g_spectrum_display;
     initial begin
         repeat (8) @(posedge clk);
         rst_n = 1'b1;
-        for (bin_index = 0; bin_index <= 1024; bin_index++) begin
+        for (bin_index = 0; bin_index <= 1229; bin_index++) begin
             @(negedge clk);
             spectrum_bin = bin_index;
             if (bin_index == 128)
                 spectrum_power = 33'd1000000; // magnitude 1000
             else if (bin_index == 512)
                 spectrum_power = 33'd250000;  // magnitude 500
+            else if (bin_index == 1229)
+                spectrum_power = 33'd562500;  // magnitude 750 at 600 kHz
             else
                 spectrum_power = 33'd100;     // magnitude 10
             spectrum_valid = 1'b1;
@@ -47,27 +49,39 @@ module tb_g_spectrum_display;
         spectrum_valid = 1'b0;
         wait (frame_done);
 
-        display_read_addr = 117;
+        display_read_addr = 102;
+        @(posedge clk);
         #1;
         if (display_read_data < 250) begin
             errors = errors+1;
             $error("Strong spectrum peak was not normalized to full scale: %0d",
                 display_read_data);
         end
-        display_read_addr = 399;
+        display_read_addr = 337;
+        @(posedge clk);
         #1;
         if (display_read_data < 124 || display_read_data > 132) begin
             errors = errors+1;
             $error("Half-amplitude spectrum peak mismatch: %0d",
                 display_read_data);
         end
+        display_read_addr = 775;
+        @(posedge clk);
+        #1;
+        if (display_read_data < 187 || display_read_data > 195) begin
+            errors = errors+1;
+            $error("600 kHz edge peak or right margin mismatch: %0d",
+                display_read_data);
+        end
         display_read_addr = 700;
+        @(posedge clk);
         #1;
         if (display_read_data > 5) begin
             errors = errors+1;
             $error("Spectrum floor unexpectedly high: %0d", display_read_data);
         end
         display_read_addr = 0;
+        @(posedge clk);
         #1;
         if (display_read_data != 0) begin
             errors = errors+1;
@@ -75,6 +89,7 @@ module tb_g_spectrum_display;
                 display_read_data);
         end
         display_read_addr = 799;
+        @(posedge clk);
         #1;
         if (display_read_data != 0) begin
             errors = errors+1;
@@ -87,7 +102,7 @@ module tb_g_spectrum_display;
         end
 
         if (errors == 0)
-            $display("PASS: 0..500 kHz spectrum is max-pooled with symmetric 24-point display margins");
+            $display("PASS: 0..600 kHz spectrum is max-pooled with symmetric 24-point display margins");
         else
             $fatal(1, "FAIL: %0d spectrum display errors", errors);
         $finish;

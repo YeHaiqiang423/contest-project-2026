@@ -114,16 +114,38 @@ module tb_g_tjc_display_uart;
 
     task automatic append_full_expected;
         begin
-            append_string("x0.val=247"); append_terminator();
-            append_string("x1.val=91"); append_terminator();
-            append_string("x2.val=62"); append_terminator();
-            append_string("x3.val=1235"); append_terminator();
-            append_string("x4.val=23"); append_terminator();
-            append_string("x5.val=2400"); append_terminator();
-            append_string("x6.val=18"); append_terminator();
-            append_string("x7.val=3600"); append_terminator();
+            append_string("x0.val=24680"); append_terminator();
+            append_string("x1.val=9050"); append_terminator();
+            append_string("x2.val=6170"); append_terminator();
+            append_string("x3.val=12345"); append_terminator();
+            append_string("x4.val=2250"); append_terminator();
+            append_string("x5.val=24000"); append_terminator();
+            append_string("x6.val=1760"); append_terminator();
+            append_string("x7.val=36000"); append_terminator();
             append_string("cle s0.id,0"); append_terminator();
             append_string("addt s0.id,0,800"); append_terminator();
+            for (i = 0; i < 800; i++) begin
+                expected[expected_count] = i[7:0];
+                expected_count = expected_count+1;
+            end
+        end
+    endtask
+
+    task automatic append_500k_fundamental_expected;
+        begin
+            append_string("x0.val=24680"); append_terminator();
+            append_string("x1.val=9050"); append_terminator();
+            append_string("x2.val=6170"); append_terminator();
+            append_string("x3.val=500000"); append_terminator();
+            append_string("x4.val=0"); append_terminator();
+            append_string("x5.val=0"); append_terminator();
+            append_string("x6.val=0"); append_terminator();
+            append_string("x7.val=0"); append_terminator();
+            append_string("cle s0.id,0"); append_terminator();
+            append_string("addt s0.id,0,800"); append_terminator();
+            // This byte ramp deliberately contains 0xFD and 0xFE.  They are
+            // transparent payload bytes on FPGA TX, not return handshakes on
+            // FPGA RX, and therefore cannot terminate or block the transfer.
             for (i = 0; i < 800; i++) begin
                 expected[expected_count] = i[7:0];
                 expected_count = expected_count+1;
@@ -208,6 +230,38 @@ module tb_g_tjc_display_uart;
             end
         end
 
+        // Put exactly 500 kHz in x3 (the lowest/fundamental component), then
+        // repeat the complete transaction.  This proves that ASCII "500000"
+        // and raw 0xFD/0xFE plot bytes do not conflict with the FE/FD RX
+        // handshake.
+        component_count = 2'd1;
+        component0_frequency_hz = 20'd500000;
+        component1_frequency_hz = 20'd0;
+        component2_frequency_hz = 20'd0;
+        append_500k_fundamental_expected();
+        measurement_valid = 1'b1;
+        @(posedge clk);
+        measurement_valid = 1'b0;
+        repeat (80) @(posedge clk);
+        send_button_n = 1'b0;
+        repeat (1200) @(posedge clk);
+        service_transparent_transfer();
+        send_button_n = 1'b1;
+        repeat (1200) @(posedge clk);
+
+        if (captured_count != expected_count) begin
+            errors = errors+1;
+            $error("500 kHz transfer byte count mismatch: got=%0d expected=%0d",
+                captured_count, expected_count);
+        end
+        for (i = 0; i < expected_count && i < captured_count; i++) begin
+            if (captured[i] !== expected[i]) begin
+                errors = errors+1;
+                $error("500 kHz transfer byte %0d mismatch: got=%02x expected=%02x",
+                    i, captured[i], expected[i]);
+            end
+        end
+
         // Calibration command remains a single ASCII C byte.
         send_rx_byte(8'h43);
         repeat (20) @(posedge clk);
@@ -227,7 +281,7 @@ module tb_g_tjc_display_uart;
         if (calibration_pulses != 1 ||
                 calibration_reference_vpp_uv != 24'd200000 ||
                 render_pulses != 1 || !three_cycle_mode || !spectrum_mode ||
-                transfer_pulses != 3 || rx_framing_error_sticky ||
+                transfer_pulses != 4 || rx_framing_error_sticky ||
                 transparent_timeout_sticky || request_overrun) begin
             errors = errors+1;
             $error("Command/status failure: cal=%0d render=%0d transfer=%0d mode=%0b/%0b",
@@ -236,7 +290,7 @@ module tb_g_tjc_display_uart;
         end
 
         if (errors == 0)
-            $display("PASS: TJC sends two-decimal-kHz x0..x7, clears s0, debounces R19, switches display modes and completes FE/FD-guarded 800-byte addt transfers");
+            $display("PASS: TJC sends three-decimal-kHz frequencies and two-decimal-mV amplitudes, clears s0, debounces R19, switches display modes and completes FE/FD-guarded 800-byte addt transfers");
         else
             $fatal(1, "FAIL: %0d TJC UART errors", errors);
         $finish;

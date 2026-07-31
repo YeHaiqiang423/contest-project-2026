@@ -2,11 +2,15 @@
 
 // Build an 800-point qualitative waveform from the 20 MSPS post-FIR stream
 // and measure the phase-dependent composite peak-to-peak voltage.  The ring
-// buffer retains enough history for three 10 kHz periods (6000 samples).
+// buffer retains enough history for three 1 kHz periods (60000 samples).
 module g_time_domain_display #(
     parameter integer SAMPLE_RATE_HZ = 20000000,
-    parameter integer BUFFER_ADDR_WIDTH = 13,
-    parameter integer DISPLAY_POINTS = 800
+    parameter integer BUFFER_ADDR_WIDTH = 16,
+    parameter integer DISPLAY_POINTS = 800,
+    parameter integer MIN_FUNDAMENTAL_HZ = 1000,
+    parameter integer MAX_FUNDAMENTAL_HZ = 600000,
+    parameter integer LOWER_BOUNDARY_TOLERANCE_HZ = 100,
+    parameter integer UPPER_BOUNDARY_TOLERANCE_HZ = 1000
 ) (
     input  wire               clk,
     input  wire               rst_n,
@@ -20,7 +24,7 @@ module g_time_domain_display #(
     input  wire               render_three_cycles,
 
     input  wire [9:0]         display_read_addr,
-    output wire [7:0]         display_read_data,
+    output reg  [7:0]         display_read_data,
     output reg                display_ready,
     output reg                render_busy,
     output reg                render_done,
@@ -31,6 +35,11 @@ module g_time_domain_display #(
 );
 
     localparam integer BUFFER_DEPTH = (1 << BUFFER_ADDR_WIDTH);
+    localparam integer MIN_PERIOD_SAMPLES =
+        (SAMPLE_RATE_HZ+(MAX_FUNDAMENTAL_HZ/2))/MAX_FUNDAMENTAL_HZ;
+    localparam integer MAX_PERIOD_SAMPLES =
+        (SAMPLE_RATE_HZ+(MIN_FUNDAMENTAL_HZ/2))/MIN_FUNDAMENTAL_HZ;
+    localparam integer MAX_SCAN_SAMPLES = MAX_PERIOD_SAMPLES*3;
     localparam [4:0] ST_IDLE = 5'd0;
     localparam [4:0] ST_PERIOD_START = 5'd1;
     localparam [4:0] ST_PERIOD_WAIT = 5'd2;
@@ -54,9 +63,10 @@ module g_time_domain_display #(
     localparam [4:0] ST_RENDER_NEXT_WAIT = 5'd20;
     localparam [4:0] ST_INTERPOLATE_DIFF = 5'd21;
     localparam [4:0] ST_SCAN_LATCH = 5'd22;
+    localparam [4:0] ST_INTERPOLATE_SUBTRACT = 5'd23;
 
     (* ram_style = "block" *) reg signed [15:0] sample_memory [0:BUFFER_DEPTH-1];
-    (* ram_style = "distributed" *) reg [7:0] display_memory [0:DISPLAY_POINTS-1];
+    (* ram_style = "block" *) reg [7:0] display_memory [0:DISPLAY_POINTS-1];
 
     reg [BUFFER_ADDR_WIDTH-1:0] write_pointer;
     reg [BUFFER_ADDR_WIDTH:0] samples_available;
@@ -68,19 +78,24 @@ module g_time_domain_display #(
     reg [19:0] frequency_latched;
     reg [23:0] gain_latched;
     reg three_cycles_latched;
-    reg [12:0] period_samples;
-    reg [13:0] scan_samples;
-    reg [13:0] scan_index;
+    reg [14:0] period_samples;
+    reg [15:0] scan_samples;
+    reg [15:0] scan_index;
     reg [BUFFER_ADDR_WIDTH-1:0] scan_start_address;
     reg signed [15:0] scan_minimum;
     reg signed [15:0] scan_maximum;
     reg [16:0] scan_range;
-    reg [13:0] render_span;
+    reg [15:0] render_span;
     reg [BUFFER_ADDR_WIDTH-1:0] render_start_address;
     reg [31:0] render_phase_q16;
     reg [31:0] render_step_q16;
     reg [9:0] render_point;
     reg signed [15:0] interpolation_sample0;
+    // Preserve a fabric register between the large history BRAM and the DSP
+    // pre-adder.  Without it Vivado absorbs this sample into DSP DREG and
+    // creates a long BRAM-to-DSP path at 200 MHz.
+    (* keep = "true", dont_touch = "true" *)
+    reg signed [15:0] interpolation_sample1;
     reg signed [15:0] interpolated_sample;
     reg signed [16:0] interpolation_difference;
     reg [15:0] interpolation_fraction;
@@ -105,9 +120,9 @@ module g_time_domain_display #(
     wire [16:0] registered_scan_range;
     wire [40:0] rounded_metric_product;
     wire [24:0] metric_uv_shifted;
+    wire fundamental_frequency_acceptable;
+    wire [19:0] bounded_fundamental_frequency_hz;
 
-    assign display_read_data = (display_read_addr < DISPLAY_POINTS) ?
-        display_memory[display_read_addr] : 8'd0;
     assign scan_minimum_next = (scan_sample < scan_minimum) ?
         scan_sample : scan_minimum;
     assign scan_maximum_next = (scan_sample > scan_maximum) ?
@@ -120,6 +135,16 @@ module g_time_domain_display #(
         $signed({scan_minimum[15], scan_minimum});
     assign rounded_metric_product = metric_product+41'd32768;
     assign metric_uv_shifted = rounded_metric_product >> 16;
+    assign fundamental_frequency_acceptable =
+        fundamental_frequency_hz >=
+            MIN_FUNDAMENTAL_HZ-LOWER_BOUNDARY_TOLERANCE_HZ &&
+        fundamental_frequency_hz <=
+            MAX_FUNDAMENTAL_HZ+UPPER_BOUNDARY_TOLERANCE_HZ;
+    assign bounded_fundamental_frequency_hz =
+        (fundamental_frequency_hz < MIN_FUNDAMENTAL_HZ) ?
+            MIN_FUNDAMENTAL_HZ :
+        ((fundamental_frequency_hz > MAX_FUNDAMENTAL_HZ) ?
+            MAX_FUNDAMENTAL_HZ : fundamental_frequency_hz);
 
     g_unsigned_divider #(
         .NUMERATOR_WIDTH(32), .DENOMINATOR_WIDTH(20)
@@ -142,7 +167,7 @@ module g_time_domain_display #(
         end
     end
 
-    // A single registered read address keeps the 8192x16 ring buffer as a
+    // A single registered read address keeps the 65536x16 ring buffer as a
     // true dual-port BRAM.  Multiple state-specific memory read expressions
     // caused Vivado to implement it as distributed RAM and created a long
     // address-adder/multiplexer path.
@@ -153,6 +178,17 @@ module g_time_domain_display #(
             ring_read_data <= sample_memory[ring_read_address];
     end
 
+    // Synchronous display read permits a compact BRAM implementation.  The
+    // UART snapshot FSM explicitly waits one clock after each address change.
+    always @(posedge clk) begin
+        if (!rst_n)
+            display_read_data <= 8'd0;
+        else if (display_read_addr < DISPLAY_POINTS)
+            display_read_data <= display_memory[display_read_addr];
+        else
+            display_read_data <= 8'd0;
+    end
+
     always @(posedge clk) begin
         if (!rst_n) begin
             state <= ST_IDLE;
@@ -160,21 +196,22 @@ module g_time_domain_display #(
             frequency_latched <= 20'd0;
             gain_latched <= 24'd0;
             three_cycles_latched <= 1'b0;
-            period_samples <= 13'd0;
-            scan_samples <= 14'd0;
-            scan_index <= 14'd0;
+            period_samples <= 15'd0;
+            scan_samples <= 16'd0;
+            scan_index <= 16'd0;
             scan_start_address <= {BUFFER_ADDR_WIDTH{1'b0}};
             ring_read_address <= {BUFFER_ADDR_WIDTH{1'b0}};
             scan_sample <= 16'sd0;
             scan_minimum <= 16'sh7fff;
             scan_maximum <= -16'sh8000;
             scan_range <= 17'd0;
-            render_span <= 14'd0;
+            render_span <= 16'd0;
             render_start_address <= {BUFFER_ADDR_WIDTH{1'b0}};
             render_phase_q16 <= 32'd0;
             render_step_q16 <= 32'd0;
             render_point <= 10'd0;
             interpolation_sample0 <= 16'sd0;
+            interpolation_sample1 <= 16'sd0;
             interpolated_sample <= 16'sd0;
             interpolation_difference <= 17'sd0;
             interpolation_fraction <= 16'd0;
@@ -215,11 +252,11 @@ module g_time_domain_display #(
                     render_busy <= 1'b0;
                     if ((measurement_valid || render_request ||
                             pending_render_request) &&
-                            fundamental_frequency_hz >= 20'd10000 &&
-                            fundamental_frequency_hz <= 20'd500000 &&
+                            fundamental_frequency_acceptable &&
                             samples_available[BUFFER_ADDR_WIDTH]) begin
                         snapshot_pointer <= write_pointer;
-                        frequency_latched <= fundamental_frequency_hz;
+                        frequency_latched <=
+                            bounded_fundamental_frequency_hz;
                         gain_latched <= active_gain_q16;
                         three_cycles_latched <= pending_render_request ?
                             pending_three_cycles : render_three_cycles;
@@ -239,28 +276,33 @@ module g_time_domain_display #(
 
                 ST_PERIOD_WAIT: begin
                     if (divider_valid) begin
-                        if (divider_zero || divider_quotient < 32'd40)
-                            period_samples <= 13'd40;
-                        else if (divider_quotient > 32'd2000)
-                            period_samples <= 13'd2000;
+                        if (divider_zero ||
+                                divider_quotient < MIN_PERIOD_SAMPLES)
+                            period_samples <= MIN_PERIOD_SAMPLES;
+                        else if (divider_quotient > MAX_PERIOD_SAMPLES)
+                            period_samples <= MAX_PERIOD_SAMPLES;
                         else
-                            period_samples <= divider_quotient[12:0];
+                            period_samples <= divider_quotient[14:0];
 
-                        if (divider_zero || divider_quotient < 32'd40)
-                            scan_samples <= 14'd120;
-                        else if (divider_quotient > 32'd2000)
-                            scan_samples <= 14'd6000;
+                        if (divider_zero ||
+                                divider_quotient < MIN_PERIOD_SAMPLES)
+                            scan_samples <= MIN_PERIOD_SAMPLES*3;
+                        else if (divider_quotient > MAX_PERIOD_SAMPLES)
+                            scan_samples <= MAX_SCAN_SAMPLES;
                         else
-                            scan_samples <= divider_quotient[12:0]*3;
+                            scan_samples <= divider_quotient[14:0]*3;
 
-                        if (divider_zero || divider_quotient < 32'd40)
-                            scan_start_address <= snapshot_pointer-13'd120;
-                        else if (divider_quotient > 32'd2000)
-                            scan_start_address <= snapshot_pointer-13'd6000;
+                        if (divider_zero ||
+                                divider_quotient < MIN_PERIOD_SAMPLES)
+                            scan_start_address <= snapshot_pointer-
+                                (MIN_PERIOD_SAMPLES*3);
+                        else if (divider_quotient > MAX_PERIOD_SAMPLES)
+                            scan_start_address <= snapshot_pointer-
+                                MAX_SCAN_SAMPLES;
                         else
                             scan_start_address <= snapshot_pointer-
-                                (divider_quotient[12:0]*3);
-                        scan_index <= 14'd0;
+                                (divider_quotient[14:0]*3);
+                        scan_index <= 16'd0;
                         scan_minimum <= 16'sh7fff;
                         scan_maximum <= -16'sh8000;
                         state <= ST_SCAN_READ;
@@ -327,7 +369,7 @@ module g_time_domain_display #(
                 end
 
                 ST_STEP_START: begin
-                    divider_numerator <= (render_span-1'b1) << 16;
+                    divider_numerator <= {render_span-1'b1, 16'd0};
                     divider_denominator <= DISPLAY_POINTS-1;
                     divider_start <= 1'b1;
                     state <= ST_STEP_WAIT;
@@ -372,8 +414,14 @@ module g_time_domain_display #(
                 end
 
                 ST_INTERPOLATE_DIFF: begin
+                    interpolation_sample1 <= ring_read_data;
+                    state <= ST_INTERPOLATE_SUBTRACT;
+                end
+
+                ST_INTERPOLATE_SUBTRACT: begin
                     interpolation_difference <=
-                        $signed({ring_read_data[15], ring_read_data})-
+                        $signed({interpolation_sample1[15],
+                        interpolation_sample1})-
                         $signed({interpolation_sample0[15],
                         interpolation_sample0});
                     state <= ST_INTERPOLATE_MULT;

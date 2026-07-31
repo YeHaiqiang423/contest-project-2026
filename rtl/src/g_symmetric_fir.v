@@ -45,7 +45,9 @@ module g_symmetric_fir #(
     reg signed [SUM_WIDTH-1:0] final_sum;
 
     reg active;
-    reg [3:0] phase;
+    // The phase selector fans out across thirteen tap-selection lanes.
+    // Explicit replication keeps its local mux controls near each DSP lane.
+    (* max_fanout = 8 *) reg [3:0] phase;
     reg valid_select;
     reg valid_pair;
     reg valid_product;

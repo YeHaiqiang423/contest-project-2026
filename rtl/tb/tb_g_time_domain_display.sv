@@ -29,9 +29,16 @@ module tb_g_time_domain_display;
     integer maximum_level;
     integer previous_level;
     integer repeated_neighbors;
+    integer render_done_count = 0;
+    integer render_done_before;
     real sample_real;
 
     always #2.5 clk = ~clk;
+
+    always @(posedge clk) begin
+        if (render_done)
+            render_done_count = render_done_count+1;
+    end
 
     g_time_domain_display dut (
         .clk(clk), .rst_n(rst_n),
@@ -59,10 +66,12 @@ module tb_g_time_domain_display;
             minimum_level = 255;
             maximum_level = 0;
             display_read_addr = 0;
+            @(posedge clk);
             #1;
             previous_level = display_read_data;
             for (point_index = 0; point_index < 800; point_index++) begin
                 display_read_addr = point_index;
+                @(posedge clk);
                 #1;
                 if (display_read_data < minimum_level)
                     minimum_level = display_read_data;
@@ -102,7 +111,7 @@ module tb_g_time_domain_display;
 
         // 20 MSPS stream represented by one valid pulse per ten 200 MHz clocks.
         // 100 kHz therefore has exactly 200 valid samples per period.
-        for (sample_index = 0; sample_index < 8300; sample_index++) begin
+        for (sample_index = 0; sample_index < 65700; sample_index++) begin
             sample_real = 1000.0*$sin(6.283185307179586*sample_index/200.0);
             sample_data = $rtoi(sample_real);
             sample_valid = 1'b1;
@@ -145,6 +154,68 @@ module tb_g_time_domain_display;
         fundamental_frequency_hz = 20'd100000;
         wait (render_done);
 
+        // 500 kHz is intentionally an interior point of the extended 600 kHz
+        // range.  A small positive estimator offset must therefore complete
+        // normally instead of recreating the original boundary deadlock.
+        repeat (4) @(posedge clk);
+        fundamental_frequency_hz = 20'd500001;
+        render_done_before = render_done_count;
+        @(negedge clk);
+        render_request = 1'b1;
+        @(negedge clk);
+        render_request = 1'b0;
+        wait (render_done_count > render_done_before);
+        repeat (4) @(posedge clk);
+        if (render_done_count <= render_done_before) begin
+            errors = errors+1;
+            $error("500 kHz interior request was stranded: state=%0d pending=%0b",
+                dut.state, dut.pending_render_request);
+        end
+
+        // The new 600 kHz demonstration boundary receives the same 1 kHz
+        // estimator tolerance and saturates only the period calculation.
+        fundamental_frequency_hz = 20'd600001;
+        render_done_before = render_done_count;
+        @(negedge clk);
+        render_request = 1'b1;
+        @(negedge clk);
+        render_request = 1'b0;
+        wait (render_done_count > render_done_before);
+        repeat (4) @(posedge clk);
+        if (render_done_count <= render_done_before) begin
+            errors = errors+1;
+            $error("600 kHz + 1 Hz boundary request was stranded: state=%0d pending=%0b",
+                dut.state, dut.pending_render_request);
+        end
+
+        // Refill the 65536-point history with a 1 kHz waveform.  The lower
+        // extension must preserve both one- and three-period rendering.
+        for (sample_index = 0; sample_index < 65700; sample_index++) begin
+            sample_real = 1000.0*$sin(
+                6.283185307179586*sample_index/20000.0);
+            sample_data = $rtoi(sample_real);
+            sample_valid = 1'b1;
+            @(posedge clk);
+            sample_valid = 1'b0;
+            repeat (9) @(posedge clk);
+        end
+        fundamental_frequency_hz = 20'd1000;
+        @(negedge clk);
+        measurement_valid = 1'b1;
+        @(posedge clk);
+        @(negedge clk);
+        measurement_valid = 1'b0;
+        wait (render_done);
+        check_waveform(1, 1);
+
+        repeat (4) @(posedge clk);
+        render_three_cycles = 1'b1;
+        render_request = 1'b1;
+        @(posedge clk);
+        render_request = 1'b0;
+        wait (render_done);
+        check_waveform(3, 0);
+
         if (request_overrun) begin
             errors = errors+1;
             $error("Unexpected time-display request overrun");
@@ -158,7 +229,7 @@ module tb_g_time_domain_display;
     end
 
     initial begin
-        #6000000;
+        #15000000;
         $display("DEBUG timeout state=%0d pending=%0b busy=%0b done=%0b frequency=%0d point=%0d",
             dut.state, dut.pending_render_request, render_busy, render_done,
             fundamental_frequency_hz, dut.render_point);

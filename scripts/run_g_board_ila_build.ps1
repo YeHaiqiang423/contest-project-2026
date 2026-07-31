@@ -19,13 +19,13 @@ try {
         throw "Board ILA build failed with exit code $vivadoExitCode"
     }
     if (-not (Select-String -LiteralPath $buildLog `
-            -Pattern '^BOARD_ILA_BUILD_PASS:' -Quiet)) {
-        throw "Board ILA success marker missing from $buildLog"
+            -Pattern '^BOARD_RELEASE_BUILD_PASS:' -Quiet)) {
+        throw "Board release success marker missing from $buildLog"
     }
-    foreach ($name in @('g_board_ila.bit', 'g_board_ila.ltx', 'build_manifest.txt')) {
+    foreach ($name in @('g_board_release.bit', 'build_manifest.txt')) {
         $path = Join-Path $outputDir $name
         if (-not (Test-Path -LiteralPath $path)) {
-            throw "Expected board ILA artifact missing: $path"
+            throw "Expected board release artifact missing: $path"
         }
     }
 }
