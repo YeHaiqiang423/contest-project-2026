@@ -3,7 +3,7 @@ function analyze_g_fixed_fir()
 
     fs_hz = 20e6;
     num_taps = 255;
-    cutoff_hz = 750e3;
+    cutoff_hz = 800e3;
     beta = 7.86;
     coefficient_fraction_bits = 17;
     adc_width = 14;

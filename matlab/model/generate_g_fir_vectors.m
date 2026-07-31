@@ -5,7 +5,7 @@ function generate_g_fir_vectors()
     adc_width = 14;
     fraction_bits = 17;
     num_taps = 255;
-    float_coeff = g_design_lowpass(num_taps, 750e3, 20e6, 7.86);
+    float_coeff = g_design_lowpass(num_taps, 800e3, 20e6, 7.86);
     integer_coeff = round(float_coeff*2^fraction_bits);
     center = (num_taps+1)/2;
     integer_coeff(center) = integer_coeff(center) + ...

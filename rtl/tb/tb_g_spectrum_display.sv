@@ -47,14 +47,14 @@ module tb_g_spectrum_display;
         spectrum_valid = 1'b0;
         wait (frame_done);
 
-        display_read_addr = 100;
+        display_read_addr = 117;
         #1;
         if (display_read_data < 250) begin
             errors = errors+1;
             $error("Strong spectrum peak was not normalized to full scale: %0d",
                 display_read_data);
         end
-        display_read_addr = 400;
+        display_read_addr = 399;
         #1;
         if (display_read_data < 124 || display_read_data > 132) begin
             errors = errors+1;
@@ -67,13 +67,27 @@ module tb_g_spectrum_display;
             errors = errors+1;
             $error("Spectrum floor unexpectedly high: %0d", display_read_data);
         end
+        display_read_addr = 0;
+        #1;
+        if (display_read_data != 0) begin
+            errors = errors+1;
+            $error("Left spectrum margin was not blank: %0d",
+                display_read_data);
+        end
+        display_read_addr = 799;
+        #1;
+        if (display_read_data != 0) begin
+            errors = errors+1;
+            $error("Right spectrum margin was not blank: %0d",
+                display_read_data);
+        end
         if (capture_overrun) begin
             errors = errors+1;
             $error("Unexpected spectrum capture overrun");
         end
 
         if (errors == 0)
-            $display("PASS: 0..500 kHz spectrum is max-pooled into 800 amplitude-proportional display points");
+            $display("PASS: 0..500 kHz spectrum is max-pooled with symmetric 24-point display margins");
         else
             $fatal(1, "FAIL: %0d spectrum display errors", errors);
         $finish;

@@ -49,7 +49,7 @@ bit/ltx + Hardware Manager/ILA：用真实 ADC、50 Ω 信号源验证
 `matlab/model/g_measurement_model.m` 是算法参考。它依次执行：
 
 1. 200 MSPS 数据每 10 点取 1 点，得到 20 MSPS；
-2. 设计并应用 255 tap、750 kHz 截止的 Kaiser 窗低通；
+2. 设计并应用 255 tap、800 kHz 截止的 Kaiser 窗低通；
 3. 再每 10 点取 1 点，得到 2 MSPS；
 4. 取 4096 点、去均值、乘 Hann 窗并做 FFT；
 5. 在 10～500 kHz 内搜索最多三个局部峰；
@@ -85,17 +85,17 @@ h[n]       = h_ideal[n] · Kaiser(n, beta)
 h[n]       = h[n] / Σh[n]
 ```
 
-当前参数为 `Fs=20 MHz`、`fc=750 kHz`、`beta=7.86`。`analyze_g_fixed_fir.m` 将系数量化为 signed Q1.17，并修正中心抽头，使整数系数之和严格等于 `2^17`，因此直流增益严格为 1。它还验证对称性、累加器位宽与频响：
+当前参数为 `Fs=20 MHz`、`fc=800 kHz`、`beta=7.86`。`analyze_g_fixed_fir.m` 将系数量化为 signed Q1.17，并修正中心抽头，使整数系数之和严格等于 `2^17`，因此直流增益严格为 1。它还验证对称性、累加器位宽与频响：
 
 | 项目 | 当前结果 |
 |---|---:|
-| 通带 0～500 kHz 波纹 | 0.001954 dB |
-| 500 kHz 增益 | -0.001011 dB |
-| 1 MHz 起最差阻带 | -76.718 dB |
+| 通带 0～500 kHz 波纹 | 0.001899 dB |
+| 500 kHz 增益 | +0.000095 dB |
+| 1 MHz 起最差阻带 | -73.347 dB |
 | 所需累加器 | 32 bit |
 | 量化后对称误差 | 0 LSB |
 
-截止频率选在 750 kHz，是在“500 kHz 内尽量平坦”和“1 MHz 起快速衰减”之间留过渡带。它不等于允许先把 200 MSPS 无滤波抽到 20 MSPS：第一次 `/10` 之前的模拟抗混叠责任仍存在。
+截止频率选在 800 kHz，是在“500 kHz 内尽量平坦”和“1 MHz 起快速衰减”之间留过渡带；量化后 1 MHz 起仍有 73 dB 以上抑制。提高截止频率并不是 500 kHz 故障的主要修复，真正的边界问题在峰值搜索对最后合法 bin 的判定。数字低通也不等于允许先把 200 MSPS 无滤波抽到 20 MSPS：第一次 `/10` 之前的模拟抗混叠责任仍存在。
 
 ### 3.3 MATLAB 如何成为 RTL 的裁判
 
@@ -106,7 +106,7 @@ MATLAB 不只画图，还生成可被 Testbench 读取的位真文件：
 - `generate_g_frame_vectors.m`：第二级抽取和帧边界；
 - `generate_g_hann_vectors.m`：4096 点 Hann 的前半 ROM，以及小规模逐点乘法期望值；
 - `generate_g_pipeline_vectors.m`：ADC 码到 FFT 输入前的端到端期望值；
-- `generate_g_fft_spectrum_vectors.m`：500 kHz、三音、10 kHz、13 kHz 和 300 kHz 五帧频谱测试。
+- `generate_g_fft_spectrum_vectors.m`：精确/非相干 500 kHz、不同初相位、499.5/499.9 kHz，以及弱基波三音的十帧频谱测试。
 
 例如 Hann 定点乘法不是笼统的“乘 0.5”，而是明确规定：
 
@@ -131,6 +131,7 @@ MATLAB 与 RTL 使用同一舍入规则，Testbench 才能逐 bit 比较，而�
 | 频域变换 | `g_fft_core_wrapper.v` | 实数时域 → 复数频域 | Vivado FFT 配置、bin 与 block exponent |
 | 参数提取 | `g_spectrum_analyzer.v` | 复数 bin → 三个分量 | 功率、峰搜索、频率插值、幅值补偿 |
 | 物理量换算 | `g_measurement_calibrator.v` | code → μV/Hz | 校准、频率排序、Um 与真 RMS |
+| 结果稳定门 | `g_measurement_stabilizer.v` | 连续测量帧 → 稳定结果 | 两帧一致性判断、拒绝改频/开关通道的过渡帧 |
 | 时域显示 | `g_time_domain_display.v` | 20 MSPS FIR 流 → 800 点 | 环形缓存、整体 Vpp、一/三周期图 |
 | 频谱显示 | `g_spectrum_display.v` | 0～500 kHz 功率 → 800 点 | max-pooling、开方、归一化 |
 | 人机接口 | `g_tjc_display_uart.v` | 物理量/图 → UART | 按键、消抖、BCD、透明传图与快照 |
@@ -247,7 +248,7 @@ Ccorrected   = C·Hcorr(delta)
 
 两个系数量化为 Q16 的 `42431` 和 `16975`，拟合范围 `[-0.5,0.5]` 内最坏误差约低于 0.03%。之后再恢复 block exponent 和 Hann 相干增益，得到正弦峰值 `amplitude_code`。这解释了扫频时同一输入幅值的 code 基本不随 bin 位置变化。
 
-当前 XSim 五帧自检结果包括：500 kHz/800 code、三音 1000/300/120 code、10 kHz/700 code、13 kHz/650 code、300 kHz/900 code，频率和幅值均回到期望整数值。
+当前 XSim 十帧自检覆盖精确 500 kHz 的不同相位、499.5/499.9 kHz 上边界邻域，以及基波明显弱于二/四次谐波且各自带相位的三音输入。频率与幅值均回到期望值，说明这些条件在纯数字 Hann/FFT/峰值算法中可重复通过；若上板仍出现历史状态依赖，应优先检查 ADC/FIFO/帧握手和信号源状态。
 
 ### 4.7 电压校准、分量 Um 与真 RMS
 
@@ -294,6 +295,8 @@ max(u)-min(u) = 425.88 mV ≈ 426 mV
 
 所以当时显示的 426 mVpp 和 116 mVrms 与三个分量完全自洽；不能用 `2×(25+101+126)=504 mV` 判断整体 Vpp 错误。
 
+校准之后还有一层 `g_measurement_stabilizer.v`。它不做平均，也不修改频率/幅值，只要求连续两帧的分量数一致，并且对应分量满足频率差不超过 1 kHz、幅值和总 RMS 差不超过 5 mV，第二帧才发布给屏幕。信号源关断、改频、再打开时产生的第一帧会被挡住；代价仅增加一帧约 2.048 ms，远低于 2 s 限制。
+
 ### 4.8 一周期/三周期波形与定性频谱
 
 时域显示根据最低频分量计算
@@ -304,7 +307,9 @@ period_samples = round(20 MHz/f0)
 
 从环形 BRAM 快照中选取一或三个周期，以 Q16 地址步长重采样为 800 点，再按本次扫描的 min/max 归一化到 0～255。它是定性波形，纵轴自动铺满，不可从图高直接读取 mV；数值应看 `x0..x7`。
 
-频谱显示将正频率 bin 0～1024 映射到 800 列。同一列落入多个 bin 时取最大功率，再开平方变回与电压幅值成正比的量，最后相对全谱最大值归一化到 0～255。若直接显示功率，较小谐波会按幅值平方被压得过低。
+频谱显示将正频率 bin 0～1024 映射到列 24～775，左右各保留 24 点空白，使 0 Hz 和 500 kHz 边界谱线不会被控件裁去一半。同一列落入多个 bin 时取最大功率，再开平方变回与电压幅值成正比的量，最后相对全谱最大值归一化到 0～255。若直接显示功率，较小谐波会按幅值平方被压得过低。
+
+时域图不是改变测量数据，而是只在显示支路对相邻真实样点做线性插值。500 kHz 在 20 MSPS 下每周期有 40 个真实点，直接最近邻扩展到 800 列会出现长平台；插值后的曲线更连续，同时 Vpp、RMS、FFT 与校准仍使用原始样本，不会为了“好看”篡改测量值。
 
 ## 5. 串口屏协议与交互
 
@@ -314,14 +319,14 @@ TJC8048X270_11 使用 115200、8-N-1：FPGA TX=W18，RX=W19。R19/PL KEY1 低有
 |---|---|---|
 | `x0` | 整体 Vpp，四舍五入为整数 mV | mV |
 | `x1` | 整体真 RMS，四舍五入为整数 mV | mV |
-| `x2` / `x3` | 最低频分量 Um / 频率 | mV / kHz（三位小数） |
-| `x4` / `x5` | 第二分量 Um / 频率 | mV / kHz（三位小数） |
-| `x6` / `x7` | 第三分量 Um / 频率 | mV / kHz（三位小数） |
+| `x2` / `x3` | 最低频分量 Um / 频率 | mV / kHz（两位小数） |
+| `x4` / `x5` | 第二分量 Um / 频率 | mV / kHz（两位小数） |
+| `x6` / `x7` | 第三分量 Um / 频率 | mV / kHz（两位小数） |
 | `s0` | 800 个 8 bit 点 | 800×256 定性图 |
 
-频率直接发送整数 Hz，例如 12345 在屏上按缩放显示 12.345 kHz。按钮返回 ASCII：`C=0x43` 校准、`1=0x31` 单周期、`3=0x33` 三周期、`S=0x53` 频谱。
+频率先四舍五入到 10 Hz 再发送，例如 12345 Hz 发送 1235，屏幕控件设两位小数后显示 12.35 kHz。按钮返回 ASCII：`C=0x43` 校准、`1=0x31` 单周期、`3=0x33` 三周期、`S=0x53` 频谱。
 
-图形先发送 `addt s0.id,0,800` 和三个 `0xFF`，收到屏幕 `0xFE` 后发送 800 个原始字节，等待 `0xFD` 完成。发送前先把显示 RAM 复制到快照 BRAM，防止 UART 慢速传输期间后台更新造成画面前后半帧不一致。
+图形先发送 `cle s0.id,0` 清除旧轨迹，再发送 `addt s0.id,0,800` 和三个 `0xFF`；收到屏幕 `0xFE` 后发送 800 个原始字节，等待 `0xFD` 完成。发送前先把显示 RAM 复制到快照 BRAM，防止 UART 慢速传输期间后台更新造成画面前后半帧不一致。FE/FD 等待均有超时回收，丢失一次握手不会让模式按钮永久卡死。
 
 ## 6. 工程实现中最值得复盘的优化
 
@@ -343,9 +348,13 @@ TJC8048X270_11 使用 115200、8-N-1：FPGA TX=W18，RX=W19。R19/PL KEY1 低有
 - 测量结果先锁存，再启动 BCD 和 UART；图形先快照，避免撕裂。
 - 跨模块使用 `valid/ready/done/busy`，不靠固定延迟猜结果时间。
 - overrun、FFT protocol error、UART framing error、transparent timeout 等错误采用 sticky 标志，瞬时故障不会在 ILA 中一闪而过。
-- ILA 只保留 Vpp/RMS、前两分量和紧凑 health/control 共 7 个 probe、深度 2048，避免调试核消耗过多 BRAM与路由。
+- ILA 不再重复保存屏幕已经能读出的 Vpp、RMS 和分量结果，只保留 ADC/FIR/FFT 数据、FFT bin 和 32 bit 紧凑诊断状态，共 7 个 probe、深度 8192。这样能定位“第一次在哪一级失真”，同时避免为了演示堆叠无关探针。
 
-最终正式镜像为 8151 LUT、13325 FF、24 BRAM tile、39 DSP；200 MHz 建立裕量 `+0.003 ns`、保持裕量 `+0.034 ns`，无未约束内部路径。建立裕量非常窄，任何 RTL、ILA、IP 或 XDC 改动后都必须完整重新实现，不能沿用旧 bitstream 的时序结论。
+2026-07-31 最终正式镜像为 8521 LUT、13736 FF、43 BRAM tile、40 DSP；200 MHz
+建立裕量 `+0.059 ns`、保持裕量 `+0.034 ns`，无未约束内部路径，DRC 为
+`0 Error / 0 Critical Warning`。用户确认的 `−0.104 ns` 临时上板容许量最终没有用到；
+本镜像本身已满足建立/保持时序。裕量仍然较窄，任何 RTL、ILA、IP 或 XDC 改动后都
+必须完整重新实现，不能沿用旧 bitstream 的时序结论。
 
 ## 7. 验证闭环与常用命令
 
@@ -366,6 +375,7 @@ powershell -ExecutionPolicy Bypass -File scripts/run_g_frame_xsim.ps1
 powershell -ExecutionPolicy Bypass -File scripts/run_g_fft_input_xsim.ps1
 powershell -ExecutionPolicy Bypass -File scripts/run_g_fft_spectrum_xsim.ps1
 powershell -ExecutionPolicy Bypass -File scripts/run_g_measurement_calibrator_xsim.ps1
+powershell -ExecutionPolicy Bypass -File scripts/run_g_measurement_stabilizer_xsim.ps1
 powershell -ExecutionPolicy Bypass -File scripts/run_g_display_builders_xsim.ps1
 powershell -ExecutionPolicy Bypass -File scripts/run_g_tjc_display_uart_xsim.ps1
 ```

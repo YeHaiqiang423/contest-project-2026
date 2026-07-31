@@ -69,6 +69,7 @@ module g_tjc_display_uart #(
     localparam [3:0] TX_WAIT_FE = 4'd4;
     localparam [3:0] TX_RAW = 4'd5;
     localparam [3:0] TX_WAIT_FD = 4'd6;
+    localparam [3:0] TX_CLEAR = 4'd7;
 
     wire [7:0] rx_data;
     wire rx_valid;
@@ -122,6 +123,7 @@ module g_tjc_display_uart #(
     reg [4:0] command_index;
     reg [3:0] digit_start;
     reg [31:0] handshake_counter;
+    reg [31:0] request_wait_counter;
 
     wire selected_display_ready;
     wire all_bcd_valid;
@@ -134,8 +136,11 @@ module g_tjc_display_uart #(
         spectrum_display_ready : waveform_display_ready;
     assign all_bcd_valid = bcd0_valid && bcd1_valid && bcd2_valid &&
         bcd3_valid && bcd4_valid && bcd5_valid && bcd6_valid && bcd7_valid;
+    // Frequency values are converted from Hz to 10 Hz units by omitting the
+    // final BCD digit.  With the TJC virtual-float decimals set to two this
+    // displays kHz as, for example, 50000 Hz -> 50.00 kHz.
     assign selected_last_digit = (numeric_field == 4'd3 ||
-        numeric_field == 4'd5 || numeric_field == 4'd7) ? 4'd7 : 4'd4;
+        numeric_field == 4'd5 || numeric_field == 4'd7) ? 4'd6 : 4'd4;
     assign selected_digit_count = selected_last_digit-digit_start+1'b1;
     assign numeric_final_index = 5'd7+selected_digit_count+5'd2;
 
@@ -162,7 +167,7 @@ module g_tjc_display_uart #(
         .valid(bcd2_valid), .bcd(bcd2));
     g_binary_to_bcd frequency0_bcd (
         .clk(clk), .rst_n(rst_n), .start(bcd_start),
-        .binary({5'd0, component0_frequency_hz}), .busy(),
+        .binary({5'd0, component0_frequency_hz}+25'd5), .busy(),
         .valid(bcd3_valid), .bcd(bcd3));
     g_binary_to_bcd amplitude1_bcd (
         .clk(clk), .rst_n(rst_n), .start(bcd_start),
@@ -170,7 +175,7 @@ module g_tjc_display_uart #(
         .valid(bcd4_valid), .bcd(bcd4));
     g_binary_to_bcd frequency1_bcd (
         .clk(clk), .rst_n(rst_n), .start(bcd_start),
-        .binary({5'd0, component1_frequency_hz}), .busy(),
+        .binary({5'd0, component1_frequency_hz}+25'd5), .busy(),
         .valid(bcd5_valid), .bcd(bcd5));
     g_binary_to_bcd amplitude2_bcd (
         .clk(clk), .rst_n(rst_n), .start(bcd_start),
@@ -178,7 +183,7 @@ module g_tjc_display_uart #(
         .valid(bcd6_valid), .bcd(bcd6));
     g_binary_to_bcd frequency2_bcd (
         .clk(clk), .rst_n(rst_n), .start(bcd_start),
-        .binary({5'd0, component2_frequency_hz}), .busy(),
+        .binary({5'd0, component2_frequency_hz}+25'd5), .busy(),
         .valid(bcd7_valid), .bcd(bcd7));
 
     function [31:0] selected_bcd;
@@ -223,7 +228,7 @@ module g_tjc_display_uart #(
         reg [3:0] final_digit;
         begin
             final_digit = (field_number == 4'd3 || field_number == 4'd5 ||
-                field_number == 4'd7) ? 4'd7 : 4'd4;
+                field_number == 4'd7) ? 4'd6 : 4'd4;
             if (decimal_digit(field_number, 0) != "0") first_digit = 0;
             else if (decimal_digit(field_number, 1) != "0") first_digit = 1;
             else if (decimal_digit(field_number, 2) != "0") first_digit = 2;
@@ -243,7 +248,7 @@ module g_tjc_display_uart #(
         reg [3:0] count;
         begin
             final_number = (field_number == 4'd3 || field_number == 4'd5 ||
-                field_number == 4'd7) ? 4'd7 : 4'd4;
+                field_number == 4'd7) ? 4'd6 : 4'd4;
             count = final_number-first_number+1'b1;
             case (character_number)
                 0: numeric_character = "x";
@@ -285,6 +290,26 @@ module g_tjc_display_uart #(
                 14: addt_character = "0";
                 15: addt_character = "0";
                 default: addt_character = 8'hff;
+            endcase
+        end
+    endfunction
+
+    function [7:0] clear_character;
+        input [3:0] character_number;
+        begin
+            case (character_number)
+                0: clear_character = "c";
+                1: clear_character = "l";
+                2: clear_character = "e";
+                3: clear_character = " ";
+                4: clear_character = "s";
+                5: clear_character = "0";
+                6: clear_character = ".";
+                7: clear_character = "i";
+                8: clear_character = "d";
+                9: clear_character = ",";
+                10: clear_character = "0";
+                default: clear_character = 8'hff;
             endcase
         end
     endfunction
@@ -392,6 +417,7 @@ module g_tjc_display_uart #(
             command_index <= 5'd0;
             digit_start <= 4'd0;
             handshake_counter <= 32'd0;
+            request_wait_counter <= 32'd0;
             display_read_addr <= 10'd0;
             plot_snapshot_read_data <= 8'd0;
             tx_start <= 1'b0;
@@ -436,6 +462,7 @@ module g_tjc_display_uart #(
                         copy_index <= 10'd0;
                         display_read_addr <= 10'd0;
                         transfer_busy <= 1'b1;
+                        request_wait_counter <= 32'd0;
                         tx_state <= TX_COPY_PLOT;
                     end else if (plot_request_pending &&
                             selected_display_ready &&
@@ -446,7 +473,21 @@ module g_tjc_display_uart #(
                         copy_index <= 10'd0;
                         display_read_addr <= 10'd0;
                         transfer_busy <= 1'b1;
+                        request_wait_counter <= 32'd0;
                         tx_state <= TX_COPY_PLOT;
+                    end else if (full_request_pending ||
+                            plot_request_pending) begin
+                        if (request_wait_counter >=
+                                HANDSHAKE_TIMEOUT_CYCLES-1) begin
+                            full_request_pending <= 1'b0;
+                            plot_request_pending <= 1'b0;
+                            request_wait_counter <= 32'd0;
+                            transparent_timeout_sticky <= 1'b1;
+                        end else begin
+                            request_wait_counter <= request_wait_counter+1'b1;
+                        end
+                    end else begin
+                        request_wait_counter <= 32'd0;
                     end
                 end
 
@@ -461,7 +502,7 @@ module g_tjc_display_uart #(
                             tx_state <= TX_NUMERIC;
                         end else begin
                             command_index <= 5'd0;
-                            tx_state <= TX_ADDT;
+                            tx_state <= TX_CLEAR;
                         end
                     end else begin
                         copy_index <= copy_index+1'b1;
@@ -477,11 +518,24 @@ module g_tjc_display_uart #(
                         if (command_index == numeric_final_index) begin
                             command_index <= 5'd0;
                             if (numeric_field == 4'd7) begin
-                                tx_state <= TX_ADDT;
+                                tx_state <= TX_CLEAR;
                             end else begin
                                 numeric_field <= numeric_field+1'b1;
                                 digit_start <= first_digit(numeric_field+1'b1);
                             end
+                        end else begin
+                            command_index <= command_index+1'b1;
+                        end
+                    end
+                end
+
+                TX_CLEAR: begin
+                    if (!tx_busy && !tx_start) begin
+                        tx_data <= clear_character(command_index[3:0]);
+                        tx_start <= 1'b1;
+                        if (command_index == 5'd13) begin
+                            command_index <= 5'd0;
+                            tx_state <= TX_ADDT;
                         end else begin
                             command_index <= command_index+1'b1;
                         end

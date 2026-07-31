@@ -109,8 +109,21 @@ module g_board_ila_top (
     wire calibration_busy;
     wire calibration_done;
     wire calibration_error;
-    wire measurement_valid;
+    wire calibrated_measurement_valid;
     wire measurement_overrun;
+    wire [1:0] calibrated_component_count;
+    wire [19:0] calibrated_component0_frequency_hz;
+    wire [19:0] calibrated_component1_frequency_hz;
+    wire [19:0] calibrated_component2_frequency_hz;
+    wire [23:0] calibrated_component0_amplitude_uv;
+    wire [23:0] calibrated_component1_amplitude_uv;
+    wire [23:0] calibrated_component2_amplitude_uv;
+    wire [23:0] component0_rms_uv;
+    wire [23:0] component1_rms_uv;
+    wire [23:0] component2_rms_uv;
+    wire [23:0] calibrated_total_true_rms_uv;
+    wire measurement_valid;
+    wire measurement_stable;
     wire [1:0] measurement_component_count;
     wire [19:0] component0_frequency_hz;
     wire [19:0] component1_frequency_hz;
@@ -118,9 +131,6 @@ module g_board_ila_top (
     wire [23:0] component0_amplitude_uv;
     wire [23:0] component1_amplitude_uv;
     wire [23:0] component2_amplitude_uv;
-    wire [23:0] component0_rms_uv;
-    wire [23:0] component1_rms_uv;
-    wire [23:0] component2_rms_uv;
     wire [23:0] total_true_rms_uv;
     wire total_vpp_valid;
     wire [15:0] total_vpp_code;
@@ -151,7 +161,7 @@ module g_board_ila_top (
     wire uart_transparent_timeout;
     wire uart_request_overrun;
 
-    wire [15:0] ila_measurement_control;
+    wire [31:0] ila_diagnostic_control;
     wire fft_protocol_error;
 
     IBUF clock_input_buffer (
@@ -432,8 +442,37 @@ module g_board_ila_top (
         .calibration_busy(calibration_busy),
         .calibration_done(calibration_done),
         .calibration_error(calibration_error),
-        .measurement_valid(measurement_valid),
+        .measurement_valid(calibrated_measurement_valid),
         .measurement_overrun(measurement_overrun),
+        .component_count(calibrated_component_count),
+        .component0_frequency_hz(calibrated_component0_frequency_hz),
+        .component1_frequency_hz(calibrated_component1_frequency_hz),
+        .component2_frequency_hz(calibrated_component2_frequency_hz),
+        .component0_amplitude_uv(calibrated_component0_amplitude_uv),
+        .component1_amplitude_uv(calibrated_component1_amplitude_uv),
+        .component2_amplitude_uv(calibrated_component2_amplitude_uv),
+        .component0_rms_uv(component0_rms_uv),
+        .component1_rms_uv(component1_rms_uv),
+        .component2_rms_uv(component2_rms_uv),
+        .total_true_rms_uv(calibrated_total_true_rms_uv)
+    );
+
+    // Only publish two consecutive, mutually consistent frames.  This removes
+    // source switching transients from the visible result while adding about
+    // 2.048 ms, far below the contest's two-second limit.
+    g_measurement_stabilizer measurement_stabilizer (
+        .clk(clk_200), .rst_n(measurement_rst_n),
+        .measurement_valid(calibrated_measurement_valid),
+        .component_count_in(calibrated_component_count),
+        .component0_frequency_hz_in(calibrated_component0_frequency_hz),
+        .component1_frequency_hz_in(calibrated_component1_frequency_hz),
+        .component2_frequency_hz_in(calibrated_component2_frequency_hz),
+        .component0_amplitude_uv_in(calibrated_component0_amplitude_uv),
+        .component1_amplitude_uv_in(calibrated_component1_amplitude_uv),
+        .component2_amplitude_uv_in(calibrated_component2_amplitude_uv),
+        .total_true_rms_uv_in(calibrated_total_true_rms_uv),
+        .stable_valid(measurement_valid),
+        .stable_locked(measurement_stable),
         .component_count(measurement_component_count),
         .component0_frequency_hz(component0_frequency_hz),
         .component1_frequency_hz(component1_frequency_hz),
@@ -441,9 +480,6 @@ module g_board_ila_top (
         .component0_amplitude_uv(component0_amplitude_uv),
         .component1_amplitude_uv(component1_amplitude_uv),
         .component2_amplitude_uv(component2_amplitude_uv),
-        .component0_rms_uv(component0_rms_uv),
-        .component1_rms_uv(component1_rms_uv),
-        .component2_rms_uv(component2_rms_uv),
         .total_true_rms_uv(total_true_rms_uv)
     );
 
@@ -524,34 +560,53 @@ module g_board_ila_top (
     assign fft_protocol_error = fft_error_sticky[0] |
         fft_error_sticky[1] | fft_error_sticky[2] | fft_error_sticky[4];
 
-    // Compact final-display health/control probe.
-    assign ila_measurement_control[0] = total_vpp_valid;
-    assign ila_measurement_control[1] = measurement_valid;
-    assign ila_measurement_control[2] = calibration_busy;
-    assign ila_measurement_control[3] = calibration_done;
-    assign ila_measurement_control[4] = calibration_error;
-    assign ila_measurement_control[5] = uart_send_button_pressed;
-    assign ila_measurement_control[6] = uart_transfer_busy;
-    assign ila_measurement_control[7] = uart_transfer_done;
-    assign ila_measurement_control[8] = uart_transparent_timeout;
-    assign ila_measurement_control[9] = measurement_overrun |
-        waveform_request_overrun | spectrum_display_overrun |
-        uart_request_overrun | uart_rx_framing_error_sticky;
-    assign ila_measurement_control[11:10] = measurement_component_count;
-    assign ila_measurement_control[12] = uart_spectrum_mode;
-    assign ila_measurement_control[13] = uart_three_cycle_mode;
-    assign ila_measurement_control[14] = fft_protocol_error;
-    assign ila_measurement_control[15] = system_rst_n;
+    // Keep ILA for information that cannot be read from the screen: the first
+    // point where sample coherence is lost and the ready/valid/error health
+    // around it.  User-facing voltage/frequency values are intentionally not
+    // duplicated here.
+    assign ila_diagnostic_control[0] = adc_stream_valid;
+    assign ila_diagnostic_control[1] = debug_adc_sample_valid;
+    assign ila_diagnostic_control[2] = debug_fir_output_valid;
+    assign ila_diagnostic_control[3] = fft_valid;
+    assign ila_diagnostic_control[4] = fft_input_ready;
+    assign ila_diagnostic_control[5] = fft_last;
+    assign ila_diagnostic_control[6] = fft_output_valid;
+    assign ila_diagnostic_control[7] = fft_output_ready;
+    assign ila_diagnostic_control[8] = fft_output_last;
+    assign ila_diagnostic_control[9] = spectrum_valid;
+    assign ila_diagnostic_control[10] = spectrum_results_valid;
+    assign ila_diagnostic_control[11] = debug_frame_ready;
+    assign ila_diagnostic_control[12] = debug_fft_busy;
+    assign ila_diagnostic_control[13] = frame_done;
+    assign ila_diagnostic_control[14] = measurement_valid;
+    assign ila_diagnostic_control[15] = measurement_stable;
+    assign ila_diagnostic_control[16] = fifo_status_sync[2];
+    assign ila_diagnostic_control[17] = fifo_underflow;
+    assign ila_diagnostic_control[18] = adc_input_overrun;
+    assign ila_diagnostic_control[19] = frame_overrun;
+    assign ila_diagnostic_control[20] = scheduler_overrun;
+    assign ila_diagnostic_control[21] = fft_protocol_error;
+    assign ila_diagnostic_control[22] = measurement_overrun;
+    assign ila_diagnostic_control[23] = waveform_request_overrun;
+    assign ila_diagnostic_control[24] = spectrum_display_overrun;
+    assign ila_diagnostic_control[25] = uart_request_overrun;
+    assign ila_diagnostic_control[26] = uart_transparent_timeout;
+    assign ila_diagnostic_control[27] = uart_rx_framing_error_sticky;
+    assign ila_diagnostic_control[28] = calibration_error;
+    assign ila_diagnostic_control[29] = calibration_busy;
+    assign ila_diagnostic_control[30] = system_rst_n;
+    assign ila_diagnostic_control[31] =
+        fft_output_valid && fft_output_bin == 12'd1024;
 
     board_ila initial_validation_ila (
         .clk(clk_200),
-        .probe0(total_vpp_uv),
-        .probe1(total_true_rms_uv),
-        .probe2(component0_frequency_hz),
-        .probe3(component0_amplitude_uv),
-        .probe4(component1_frequency_hz),
-        .probe5(component1_amplitude_uv),
-        .probe6(ila_measurement_control)
+        .probe0(fifo_dout),
+        .probe1(debug_fir_output_data),
+        .probe2(fft_real),
+        .probe3(fft_output_real),
+        .probe4(fft_output_imag),
+        .probe5(fft_output_bin),
+        .probe6(ila_diagnostic_control)
     );
 
 endmodule

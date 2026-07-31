@@ -16,7 +16,7 @@ function generate_g_pipeline_vectors()
     raw_twos_code = mod(raw_signed, 2^14);
 
     samples_20m = raw_signed(1:adc_decimation:end);
-    fir_float = g_design_lowpass(255, 750e3, 20e6, 7.86);
+    fir_float = g_design_lowpass(255, 800e3, 20e6, 7.86);
     fir_q17 = round(fir_float*2^17);
     fir_q17(128) = fir_q17(128)+2^17-sum(fir_q17);
     fir_output = fixed_fir(samples_20m, fir_q17, 17);

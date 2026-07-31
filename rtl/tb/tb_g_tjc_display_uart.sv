@@ -117,11 +117,12 @@ module tb_g_tjc_display_uart;
             append_string("x0.val=247"); append_terminator();
             append_string("x1.val=91"); append_terminator();
             append_string("x2.val=62"); append_terminator();
-            append_string("x3.val=12345"); append_terminator();
+            append_string("x3.val=1235"); append_terminator();
             append_string("x4.val=23"); append_terminator();
-            append_string("x5.val=24000"); append_terminator();
+            append_string("x5.val=2400"); append_terminator();
             append_string("x6.val=18"); append_terminator();
-            append_string("x7.val=36000"); append_terminator();
+            append_string("x7.val=3600"); append_terminator();
+            append_string("cle s0.id,0"); append_terminator();
             append_string("addt s0.id,0,800"); append_terminator();
             for (i = 0; i < 800; i++) begin
                 expected[expected_count] = i[7:0];
@@ -235,7 +236,7 @@ module tb_g_tjc_display_uart;
         end
 
         if (errors == 0)
-            $display("PASS: TJC sends x0..x7, debounces R19, switches 1/3-cycle/spectrum modes and completes FE/FD-guarded 800-byte addt transfers");
+            $display("PASS: TJC sends two-decimal-kHz x0..x7, clears s0, debounces R19, switches display modes and completes FE/FD-guarded 800-byte addt transfers");
         else
             $fatal(1, "FAIL: %0d TJC UART errors", errors);
         $finish;

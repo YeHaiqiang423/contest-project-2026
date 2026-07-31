@@ -28,6 +28,7 @@ module tb_g_time_domain_display;
     integer minimum_level;
     integer maximum_level;
     integer previous_level;
+    integer repeated_neighbors;
     real sample_real;
 
     always #2.5 clk = ~clk;
@@ -48,9 +49,13 @@ module tb_g_time_domain_display;
         .total_vpp_code(total_vpp_code), .total_vpp_uv(total_vpp_uv)
     );
 
-    task automatic check_waveform(input integer expected_crossings);
+    task automatic check_waveform(
+        input integer expected_crossings,
+        input integer require_smooth
+    );
         begin
             crossings = 0;
+            repeated_neighbors = 0;
             minimum_level = 255;
             maximum_level = 0;
             display_read_addr = 0;
@@ -65,6 +70,8 @@ module tb_g_time_domain_display;
                     maximum_level = display_read_data;
                 if (previous_level < 128 && display_read_data >= 128)
                     crossings = crossings+1;
+                if (point_index != 0 && previous_level == display_read_data)
+                    repeated_neighbors = repeated_neighbors+1;
                 previous_level = display_read_data;
             end
             if (minimum_level > 2 || maximum_level < 253) begin
@@ -77,6 +84,14 @@ module tb_g_time_domain_display;
                 errors = errors+1;
                 $error("Waveform cycle count failed: crossings=%0d expected=%0d",
                     crossings, expected_crossings);
+            end
+            // Eight-bit vertical quantization still repeats samples near the
+            // extrema.  Linear interpolation must nevertheless cut the old
+            // nearest-neighbor staircase (about 600 repeats here) materially.
+            if (require_smooth && repeated_neighbors > 400) begin
+                errors = errors+1;
+                $error("Waveform still contains nearest-neighbor staircases: repeated=%0d",
+                    repeated_neighbors);
             end
         end
     endtask
@@ -107,15 +122,28 @@ module tb_g_time_domain_display;
                 total_vpp_code, total_vpp_uv);
         end
         wait (render_done);
-        check_waveform(1);
+        check_waveform(1, 1);
 
         repeat (4) @(posedge clk);
+        @(negedge clk);
         render_three_cycles = 1'b1;
         render_request = 1'b1;
-        @(posedge clk);
+        @(negedge clk);
         render_request = 1'b0;
         wait (render_done);
-        check_waveform(3);
+        check_waveform(3, 0);
+
+        // A request arriving before its frequency prerequisite becomes valid
+        // must be retained rather than disappearing as a one-cycle pulse.
+        fundamental_frequency_hz = 20'd0;
+        render_three_cycles = 1'b0;
+        @(negedge clk);
+        render_request = 1'b1;
+        @(negedge clk);
+        render_request = 1'b0;
+        repeat (20) @(posedge clk);
+        fundamental_frequency_hz = 20'd100000;
+        wait (render_done);
 
         if (request_overrun) begin
             errors = errors+1;
@@ -123,15 +151,17 @@ module tb_g_time_domain_display;
         end
 
         if (errors == 0)
-            $display("PASS: 20 MSPS history yields calibrated composite Vpp and normalized 1/3-cycle 800-point waveforms");
+            $display("PASS: calibrated Vpp, retained render requests and interpolated 1/3-cycle waveforms");
         else
             $fatal(1, "FAIL: %0d time-domain display errors", errors);
         $finish;
     end
 
     initial begin
-        #3000000;
+        #6000000;
+        $display("DEBUG timeout state=%0d pending=%0b busy=%0b done=%0b frequency=%0d point=%0d",
+            dut.state, dut.pending_render_request, render_busy, render_done,
+            fundamental_frequency_hz, dut.render_point);
         $fatal(1, "Timeout in time-domain display self-check");
     end
 endmodule
-

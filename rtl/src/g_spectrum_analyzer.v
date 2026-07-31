@@ -107,10 +107,16 @@ module g_spectrum_analyzer #(
     wire [11:0] fundamental_latched01;
 
     assign fft_ready = 1'b1;
+    // MAX_BIN is a measurement boundary, not an ordinary interior bin.  A
+    // tone fractionally above bin 1024 may still be a valid nominal 500 kHz
+    // input because of source/sample-clock tolerance.  Accept a rising peak
+    // at the boundary and retain bin 1025 as its interpolation guard sample;
+    // interior bins still require a strict falling right neighbor.
     assign local_peak = previous2_valid && previous1_valid &&
         (previous1_bin >= MIN_BIN) && (previous1_bin <= MAX_BIN) &&
         (previous1_power >= previous2_power) &&
-        (previous1_power > spectrum_power);
+        ((previous1_bin == MAX_BIN) ||
+        (previous1_power > spectrum_power));
     assign threshold_power = candidate0_power >> PEAK_POWER_SHIFT;
     assign candidate0_qualified = candidate0_power != 33'd0;
     assign candidate1_qualified = candidate1_power != 33'd0 &&

@@ -6,7 +6,8 @@
 // normalized to the strongest column so line heights remain proportional to
 // voltage amplitude rather than power.
 module g_spectrum_display #(
-    parameter integer DISPLAY_POINTS = 800
+    parameter integer DISPLAY_POINTS = 800,
+    parameter integer HORIZONTAL_MARGIN = 24
 ) (
     input  wire        clk,
     input  wire        rst_n,
@@ -29,11 +30,18 @@ module g_spectrum_display #(
     localparam [3:0] ST_POINT_SQRT_WAIT = 4'd5;
     localparam [3:0] ST_DIV_START = 4'd6;
     localparam [3:0] ST_DIV_WAIT = 4'd7;
+    localparam integer ACTIVE_POINTS =
+        DISPLAY_POINTS-(2*HORIZONTAL_MARGIN);
+    localparam integer ACTIVE_SPAN = ACTIVE_POINTS-1;
 
     (* ram_style = "block" *) reg [32:0] power_memory [0:DISPLAY_POINTS-1];
     (* ram_style = "distributed" *) reg [7:0] display_memory [0:DISPLAY_POINTS-1];
 
     reg capture_active;
+    reg mapping_valid_pipe;
+    reg [11:0] mapping_bin_pipe;
+    reg [32:0] mapping_power_pipe;
+    reg [21:0] mapped_product_pipe;
     reg spectrum_valid_pipe;
     reg [11:0] spectrum_bin_pipe;
     reg [32:0] spectrum_power_pipe;
@@ -60,7 +68,6 @@ module g_spectrum_display #(
     wire [23:0] divider_quotient;
     reg [23:0] divider_numerator;
 
-    wire [21:0] mapped_product;
     wire [10:0] mapped_unclamped;
     wire [9:0] mapped_point;
     wire [32:0] capture_power_next;
@@ -68,14 +75,22 @@ module g_spectrum_display #(
 
     assign display_read_data = (display_read_addr < DISPLAY_POINTS) ?
         display_memory[display_read_addr] : 8'd0;
-    assign mapped_product = spectrum_bin*DISPLAY_POINTS;
-    assign mapped_unclamped = mapped_product >> 10;
-    assign mapped_point = (mapped_unclamped >= DISPLAY_POINTS) ?
-        DISPLAY_POINTS-1 : mapped_unclamped[9:0];
+    // Map bin 0 and bin 1024 inside the plot instead of onto the waveform
+    // widget borders, where a vertical peak is visually clipped in half.
+    assign mapped_unclamped = mapped_product_pipe >> 10;
+    assign mapped_point = (mapped_unclamped >= ACTIVE_POINTS) ?
+        DISPLAY_POINTS-HORIZONTAL_MARGIN-1 :
+        mapped_unclamped[9:0]+HORIZONTAL_MARGIN;
     assign capture_power_next = (spectrum_power_pipe > capture_maximum) ?
         spectrum_power_pipe : capture_maximum;
     assign frame_maximum_next = (capture_power_next > frame_maximum) ?
         capture_power_next : frame_maximum;
+
+    initial begin
+        if (HORIZONTAL_MARGIN < 1 ||
+                2*HORIZONTAL_MARGIN >= DISPLAY_POINTS)
+            $error("HORIZONTAL_MARGIN must leave a non-empty active plot");
+    end
 
     g_integer_sqrt magnitude_sqrt (
         .clk(clk), .rst_n(rst_n), .start(sqrt_start),
@@ -96,6 +111,10 @@ module g_spectrum_display #(
     always @(posedge clk) begin
         if (!rst_n) begin
             capture_active <= 1'b0;
+            mapping_valid_pipe <= 1'b0;
+            mapping_bin_pipe <= 12'd0;
+            mapping_power_pipe <= 33'd0;
+            mapped_product_pipe <= 22'd0;
             spectrum_valid_pipe <= 1'b0;
             spectrum_bin_pipe <= 12'd0;
             spectrum_power_pipe <= 33'd0;
@@ -124,14 +143,21 @@ module g_spectrum_display #(
             divider_start <= 1'b0;
             frame_done <= 1'b0;
 
-            // Register the FFT sample and constant-bin mapping before the
-            // BRAM write-control FSM.  This removes the multiplier/comparator
-            // chain from the 200 MHz power-memory write-enable path.
-            spectrum_valid_pipe <= spectrum_valid &&
+            // Split constant multiplication and margin/clamp into two stages.
+            // This keeps the DSP and following LUT arithmetic out of one
+            // 5 ns path while preserving bin/power alignment.
+            mapping_valid_pipe <= spectrum_valid &&
                 spectrum_bin <= 12'd1024;
             if (spectrum_valid && spectrum_bin <= 12'd1024) begin
-                spectrum_bin_pipe <= spectrum_bin;
-                spectrum_power_pipe <= spectrum_power;
+                mapping_bin_pipe <= spectrum_bin;
+                mapping_power_pipe <= spectrum_power;
+                mapped_product_pipe <= spectrum_bin*ACTIVE_SPAN;
+            end
+
+            spectrum_valid_pipe <= mapping_valid_pipe;
+            if (mapping_valid_pipe) begin
+                spectrum_bin_pipe <= mapping_bin_pipe;
+                spectrum_power_pipe <= mapping_power_pipe;
                 mapped_point_pipe <= mapped_point;
             end
 
@@ -199,7 +225,20 @@ module g_spectrum_display #(
                 end
 
                 ST_POINT_SQRT_START: begin
-                    if (maximum_magnitude == 0) begin
+                    if (process_point < HORIZONTAL_MARGIN ||
+                            process_point >=
+                            DISPLAY_POINTS-HORIZONTAL_MARGIN) begin
+                        display_memory[process_point] <= 8'd0;
+                        if (process_point == DISPLAY_POINTS-1) begin
+                            display_ready <= 1'b1;
+                            frame_done <= 1'b1;
+                            processing_busy <= 1'b0;
+                            state <= ST_IDLE;
+                        end else begin
+                            process_point <= process_point+1'b1;
+                            state <= ST_POINT_READ;
+                        end
+                    end else if (maximum_magnitude == 0) begin
                         display_memory[process_point] <= 8'd0;
                         if (process_point == DISPLAY_POINTS-1) begin
                             display_ready <= 1'b1;

@@ -46,13 +46,23 @@ module g_time_domain_display #(
     localparam [4:0] ST_SCALE_DIV_START = 5'd12;
     localparam [4:0] ST_SCALE_WAIT = 5'd13;
     localparam [4:0] ST_SCAN_FINALIZE = 5'd14;
+    localparam [4:0] ST_RENDER_READ_NEXT = 5'd15;
+    localparam [4:0] ST_INTERPOLATE_MULT = 5'd16;
+    localparam [4:0] ST_INTERPOLATE_APPLY = 5'd17;
+    localparam [4:0] ST_SCAN_READ_WAIT = 5'd18;
+    localparam [4:0] ST_RENDER_READ_WAIT = 5'd19;
+    localparam [4:0] ST_RENDER_NEXT_WAIT = 5'd20;
+    localparam [4:0] ST_INTERPOLATE_DIFF = 5'd21;
+    localparam [4:0] ST_SCAN_LATCH = 5'd22;
 
     (* ram_style = "block" *) reg signed [15:0] sample_memory [0:BUFFER_DEPTH-1];
     (* ram_style = "distributed" *) reg [7:0] display_memory [0:DISPLAY_POINTS-1];
 
     reg [BUFFER_ADDR_WIDTH-1:0] write_pointer;
     reg [BUFFER_ADDR_WIDTH:0] samples_available;
+    reg [BUFFER_ADDR_WIDTH-1:0] ring_read_address;
     reg signed [15:0] ring_read_data;
+    reg signed [15:0] scan_sample;
     reg [4:0] state;
     reg [BUFFER_ADDR_WIDTH-1:0] snapshot_pointer;
     reg [19:0] frequency_latched;
@@ -70,6 +80,11 @@ module g_time_domain_display #(
     reg [31:0] render_phase_q16;
     reg [31:0] render_step_q16;
     reg [9:0] render_point;
+    reg signed [15:0] interpolation_sample0;
+    reg signed [15:0] interpolated_sample;
+    reg signed [16:0] interpolation_difference;
+    reg [15:0] interpolation_fraction;
+    reg signed [33:0] interpolation_product;
     reg [16:0] sample_above_minimum;
     reg [24:0] scaled_sample_product;
     reg [40:0] metric_product;
@@ -93,10 +108,10 @@ module g_time_domain_display #(
 
     assign display_read_data = (display_read_addr < DISPLAY_POINTS) ?
         display_memory[display_read_addr] : 8'd0;
-    assign scan_minimum_next = (ring_read_data < scan_minimum) ?
-        ring_read_data : scan_minimum;
-    assign scan_maximum_next = (ring_read_data > scan_maximum) ?
-        ring_read_data : scan_maximum;
+    assign scan_minimum_next = (scan_sample < scan_minimum) ?
+        scan_sample : scan_minimum;
+    assign scan_maximum_next = (scan_sample > scan_maximum) ?
+        scan_sample : scan_maximum;
     assign scan_range_next =
         $signed({scan_maximum_next[15], scan_maximum_next})-
         $signed({scan_minimum_next[15], scan_minimum_next});
@@ -127,6 +142,17 @@ module g_time_domain_display #(
         end
     end
 
+    // A single registered read address keeps the 8192x16 ring buffer as a
+    // true dual-port BRAM.  Multiple state-specific memory read expressions
+    // caused Vivado to implement it as distributed RAM and created a long
+    // address-adder/multiplexer path.
+    always @(posedge clk) begin
+        if (!rst_n)
+            ring_read_data <= 16'sd0;
+        else
+            ring_read_data <= sample_memory[ring_read_address];
+    end
+
     always @(posedge clk) begin
         if (!rst_n) begin
             state <= ST_IDLE;
@@ -138,6 +164,8 @@ module g_time_domain_display #(
             scan_samples <= 14'd0;
             scan_index <= 14'd0;
             scan_start_address <= {BUFFER_ADDR_WIDTH{1'b0}};
+            ring_read_address <= {BUFFER_ADDR_WIDTH{1'b0}};
+            scan_sample <= 16'sd0;
             scan_minimum <= 16'sh7fff;
             scan_maximum <= -16'sh8000;
             scan_range <= 17'd0;
@@ -146,12 +174,16 @@ module g_time_domain_display #(
             render_phase_q16 <= 32'd0;
             render_step_q16 <= 32'd0;
             render_point <= 10'd0;
+            interpolation_sample0 <= 16'sd0;
+            interpolated_sample <= 16'sd0;
+            interpolation_difference <= 17'sd0;
+            interpolation_fraction <= 16'd0;
+            interpolation_product <= 34'sd0;
             sample_above_minimum <= 17'd0;
             scaled_sample_product <= 25'd0;
             metric_product <= 41'd0;
             pending_render_request <= 1'b0;
             pending_three_cycles <= 1'b0;
-            ring_read_data <= 16'sd0;
             divider_start <= 1'b0;
             divider_numerator <= 32'd0;
             divider_denominator <= 20'd1;
@@ -167,7 +199,11 @@ module g_time_domain_display #(
             render_done <= 1'b0;
             total_vpp_valid <= 1'b0;
 
-            if (render_request && state != ST_IDLE) begin
+            // Keep every request until ST_IDLE can accept it.  The previous
+            // one-cycle pulse handling lost a request when ST_IDLE was waiting
+            // for a valid frequency or a full ring buffer, leaving the UART
+            // transaction waiting indefinitely for render_done.
+            if (render_request) begin
                 if (pending_render_request)
                     request_overrun <= 1'b1;
                 pending_render_request <= 1'b1;
@@ -232,8 +268,18 @@ module g_time_domain_display #(
                 end
 
                 ST_SCAN_READ: begin
-                    ring_read_data <= sample_memory[
-                        scan_start_address+scan_index[BUFFER_ADDR_WIDTH-1:0]];
+                    ring_read_address <=
+                        scan_start_address+
+                        scan_index[BUFFER_ADDR_WIDTH-1:0];
+                    state <= ST_SCAN_READ_WAIT;
+                end
+
+                ST_SCAN_READ_WAIT: begin
+                    state <= ST_SCAN_LATCH;
+                end
+
+                ST_SCAN_LATCH: begin
+                    scan_sample <= ring_read_data;
                     state <= ST_SCAN_USE;
                 end
 
@@ -297,9 +343,53 @@ module g_time_domain_display #(
                 end
 
                 ST_RENDER_READ: begin
-                    ring_read_data <= sample_memory[
+                    ring_read_address <=
                         render_start_address+
-                        render_phase_q16[BUFFER_ADDR_WIDTH+15:16]];
+                        render_phase_q16[BUFFER_ADDR_WIDTH+15:16];
+                    interpolation_fraction <=
+                        (render_point == DISPLAY_POINTS-1) ?
+                        16'd0 : render_phase_q16[15:0];
+                    state <= ST_RENDER_READ_WAIT;
+                end
+
+                ST_RENDER_READ_WAIT: begin
+                    state <= ST_RENDER_READ_NEXT;
+                end
+
+                // Two sequential BRAM reads obtain adjacent 20 MSPS samples.
+                // The following multiply/apply stages perform display-only
+                // linear interpolation without extending the 200 MHz path.
+                ST_RENDER_READ_NEXT: begin
+                    interpolation_sample0 <= ring_read_data;
+                    ring_read_address <=
+                        render_start_address+
+                        render_phase_q16[BUFFER_ADDR_WIDTH+15:16]+1'b1;
+                    state <= ST_RENDER_NEXT_WAIT;
+                end
+
+                ST_RENDER_NEXT_WAIT: begin
+                    state <= ST_INTERPOLATE_DIFF;
+                end
+
+                ST_INTERPOLATE_DIFF: begin
+                    interpolation_difference <=
+                        $signed({ring_read_data[15], ring_read_data})-
+                        $signed({interpolation_sample0[15],
+                        interpolation_sample0});
+                    state <= ST_INTERPOLATE_MULT;
+                end
+
+                ST_INTERPOLATE_MULT: begin
+                    interpolation_product <=
+                        interpolation_difference*
+                        $signed({1'b0, interpolation_fraction});
+                    state <= ST_INTERPOLATE_APPLY;
+                end
+
+                ST_INTERPOLATE_APPLY: begin
+                    interpolated_sample <=
+                        $signed(interpolation_sample0)+
+                        ($signed(interpolation_product) >>> 16);
                     state <= ST_SCALE_START;
                 end
 
@@ -319,7 +409,8 @@ module g_time_domain_display #(
                         end
                     end else begin
                         sample_above_minimum <=
-                            $signed({ring_read_data[15], ring_read_data})-
+                            $signed({interpolated_sample[15],
+                            interpolated_sample})-
                             $signed({scan_minimum[15], scan_minimum});
                         state <= ST_SCALE_PRODUCT;
                     end

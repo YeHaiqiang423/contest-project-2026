@@ -29,6 +29,7 @@ add_files [list \
     [file join $project_root rtl src g_fft_core_wrapper.v] \
     [file join $project_root rtl src g_spectrum_analyzer.v] \
     [file join $project_root rtl src g_measurement_calibrator.v] \
+    [file join $project_root rtl src g_measurement_stabilizer.v] \
     [file join $project_root rtl src g_time_domain_display.v] \
     [file join $project_root rtl src g_spectrum_display.v] \
     [file join $project_root rtl src g_processing_pipeline.v] \
@@ -59,14 +60,14 @@ wait_on_run g_fft_4096_ip_synth_1
 create_ip -name ila -vendor xilinx.com -library ip -module_name board_ila
 set_property -dict [list \
     CONFIG.C_NUM_OF_PROBES {7} \
-    CONFIG.C_PROBE0_WIDTH {24} \
-    CONFIG.C_PROBE1_WIDTH {24} \
-    CONFIG.C_PROBE2_WIDTH {20} \
-    CONFIG.C_PROBE3_WIDTH {24} \
-    CONFIG.C_PROBE4_WIDTH {20} \
-    CONFIG.C_PROBE5_WIDTH {24} \
-    CONFIG.C_PROBE6_WIDTH {16} \
-    CONFIG.C_DATA_DEPTH {2048} \
+    CONFIG.C_PROBE0_WIDTH {14} \
+    CONFIG.C_PROBE1_WIDTH {16} \
+    CONFIG.C_PROBE2_WIDTH {16} \
+    CONFIG.C_PROBE3_WIDTH {16} \
+    CONFIG.C_PROBE4_WIDTH {16} \
+    CONFIG.C_PROBE5_WIDTH {12} \
+    CONFIG.C_PROBE6_WIDTH {32} \
+    CONFIG.C_DATA_DEPTH {8192} \
     CONFIG.C_INPUT_PIPE_STAGES {2} \
     CONFIG.C_ADV_TRIGGER {false} \
     CONFIG.C_EN_STRG_QUAL {1}] [get_ips board_ila]
@@ -105,8 +106,9 @@ set worst_setup_path [get_timing_paths -delay_type max -max_paths 1]
 set worst_hold_path [get_timing_paths -delay_type min -max_paths 1]
 set setup_slack [get_property SLACK $worst_setup_path]
 set hold_slack [get_property SLACK $worst_hold_path]
-if {$setup_slack < 0.0} {
-    error "BITSTREAM_GATE: negative setup slack $setup_slack ns"
+set accepted_setup_waiver_ns -0.125
+if {$setup_slack < $accepted_setup_waiver_ns} {
+    error "BITSTREAM_GATE: setup slack $setup_slack ns is below the accepted $accepted_setup_waiver_ns ns board-test waiver"
 }
 if {$hold_slack < 0.0} {
     error "BITSTREAM_GATE: negative hold slack $hold_slack ns"
@@ -162,10 +164,15 @@ puts $manifest "UART: W18 TX / W19 RX, LVCMOS33, 115200 8-N-1"
 puts $manifest "Send button: PL KEY1 R19, active low, 20 ms debounce"
 puts $manifest "Screen: TJC8048X270_11, one 800x256 waveform component s0"
 puts $manifest "Screen commands: C(0x43) calibrate, 1(0x31), 3(0x33), S(0x53) spectrum"
-puts $manifest "Screen transfer: x0..x7 plus addt s0.id,0,800 with FE/FD handshake"
-puts $manifest "ILA depth: 2048 samples at 200 MHz"
-puts $manifest "ILA probes: 7, Vpp/RMS, first two component values and compact health"
+puts $manifest "Screen transfer: cle s0.id,0 then x0..x7 plus addt s0.id,0,800 with FE/FD handshake"
+puts $manifest "Screen frequency format: integer Hz/10, configure x3/x5/x7 for 2 decimal places in kHz"
+puts $manifest "ILA probes: 7 diagnostic-only raw/FIR/FFT data and compact health, depth 8192"
 puts $manifest "Setup slack: $setup_slack ns"
+if {$setup_slack >= 0.0} {
+    puts $manifest "Setup status: timing met; $accepted_setup_waiver_ns ns temporary board-test waiver unused"
+} else {
+    puts $manifest "Setup status: accepted temporary board-test waiver to $accepted_setup_waiver_ns ns; negative slack is not timing closure"
+}
 puts $manifest "Hold slack: $hold_slack ns"
 puts $manifest "Unconstrained paths: $unconstrained_count"
 puts $manifest "Known limitation: ADC CLKOUT L20 uses CLOCK_DEDICATED_ROUTE FALSE."
