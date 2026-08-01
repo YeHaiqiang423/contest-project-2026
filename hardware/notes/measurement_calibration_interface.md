@@ -1,6 +1,6 @@
 # 频谱测量值校准与 UART 接口
 
-更新日期：2026-07-30  
+更新日期：2026-08-01
 适用模块：`g_spectrum_analyzer.v`、`g_measurement_calibrator.v`
 
 ## 1. 赛题量值定义
@@ -148,3 +148,24 @@ powershell -ExecutionPolicy Bypass -File scripts/run_g_fft_spectrum_xsim.ps1
 `results/synth_g_measurement_calibrator/`。UART 尚未接入时，板级顶层把写系数和
 自动校准触发保持为 0；UART 队友接线时应把这些控制和本节输出接到寄存器/发送器。
 
+## 7. 相位支路与校准边界
+
+`g_phase_estimator.v` 从同一份 4096 点 Hann 帧旁路计算相位，不进入上述
+`uV/code` 幅值换算。其稳定输出接口为：
+
+```text
+phase_results_valid          整对结果更新的一拍脉冲
+harmonic1_phase_valid        第一个高次分量是否为有效谐波
+harmonic1_phase_deg[8:0]     0..359 度
+harmonic2_phase_valid        第二个高次分量是否为有效谐波
+harmonic2_phase_deg[8:0]     0..359 度
+```
+
+相位采用赛题正弦定义，并输出
+`wrap360(phi_h-round(f_h/f_1)*phi_1)`。UART 收到 `P/0x50` 后，将两路有效角度
+发送到相位页 `x0/x1`；无效项发送 999，基波由屏幕固定显示 0°。
+
+现场 100 kHz/200 mVpp 定标只求电压增益，不能修正模拟前端相移。纯延时会在
+相对相位中抵消，但模拟通道的非线性相频响应不会；如实板误差随频率可重复变化，
+需要另建频率相关的相位校准表。相位是超指标展示，不改变赛题规定的频率、Um、
+整体 Vpp 和真 RMS 验收链。

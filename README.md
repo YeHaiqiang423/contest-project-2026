@@ -64,14 +64,16 @@ Vivado 综合/实现：检查资源、时序、DRC、CDC 与实际 XDC
 x[n] ≈ c + Σ(a_i cos(2πf_i n/Fs) + b_i sin(2πf_i n/Fs))
 ```
 
-用最小二乘求解系数后，单个分量的峰值和相位为
+用最小二乘求解系数后，单个分量的峰值和“余弦相位”为
 
 ```text
-A_i = sqrt(a_i²+b_i²)
-phi_i = atan2(-b_i, a_i)
+A_i       = sqrt(a_i²+b_i²)
+theta_cos = atan2(-b_i, a_i)
 ```
 
-它比只读取一个 FFT bin 更接近“计量算法”，也能处理不同初相位；代价是矩阵求解不适合直接照搬到当前 FPGA。RTL 因而使用更便宜的 Hann 三点插值和幅值补偿。换言之，MATLAB 是精度上限和交叉检查工具，不是 RTL 的逐语句翻译。
+赛题表达式采用 `A_i·sin(ω_i t+phi_i)`，所以相位页使用正弦相位
+`phi_sin=wrap(theta_cos+90°)=atan2(a_i,b_i)`。这两个定义只差 90°，但不能混写。
+最小二乘比只读取一个 FFT bin 更接近“计量算法”，也能处理不同初相位；代价是矩阵求解不适合直接照搬到当前 FPGA。RTL 的频率/幅值主链因而使用更便宜的 Hann 三点插值和幅值补偿，相位超指标支路则在已检测频率处做正交相关。换言之，MATLAB 是精度上限和交叉检查工具，不是 RTL 的逐语句翻译。
 
 `matlab/model/run_g_model_regression.m` 构造覆盖三项任务的确定性测试：不同基频、谐波阶次、初相位、50～250 mVpp 输入，以及 1 MHz、1.37 MHz、5 MHz 干扰；还加入直流偏置、14 bit/2 Vpp ADC 量化和小量噪声。每例自动检查分量数、频率、各分量幅值、整体 Vpp 和 RMS 是否落入题目误差预算，结果写入 `results/g_model_regression.csv`。
 
@@ -107,6 +109,7 @@ MATLAB 不只画图，还生成可被 Testbench 读取的位真文件：
 - `generate_g_hann_vectors.m`：4096 点 Hann 的前半 ROM，以及小规模逐点乘法期望值；
 - `generate_g_pipeline_vectors.m`：ADC 码到 FFT 输入前的端到端期望值；
 - `generate_g_fft_spectrum_vectors.m`：1 kHz 下边界、精确/非相干 500 kHz、600 kHz 上边界、不同初相位，以及弱基波三音的十三帧频谱测试。
+- `generate_g_phase_vectors.m`：正弦相位定义、弱基波、off-bin、359°/1° 回绕、帧起点平移、缺失与非谐波分量，共 18 帧相位黄金向量及 4096 点 Q1.15 正弦 ROM。
 
 例如 Hann 定点乘法不是笼统的“乘 0.5”，而是明确规定：
 
@@ -130,6 +133,7 @@ MATLAB 与 RTL 使用同一舍入规则，Testbench 才能逐 bit 比较，而�
 | FFT 输入 | `g_fft_input_stream.v` | 4096 点帧 | Q1.15 Hann、AXI Stream 握手 |
 | 频域变换 | `g_fft_core_wrapper.v` | 实数时域 → 复数频域 | Vivado FFT 配置、bin 与 block exponent |
 | 参数提取 | `g_spectrum_analyzer.v` | 复数 bin → 三个分量 | 功率、峰搜索、频率插值、幅值补偿 |
+| 相位超指标支路 | `g_phase_estimator.v` + `g_sine_cos_rom.v` + `g_cordic_atan2.v` | 同一 Hann 帧 + 精确频率 → 相对相位 | 正交相关、CORDIC、谐波阶次与圆周稳定门 |
 | 物理量换算 | `g_measurement_calibrator.v` | code → μV/Hz | 校准、频率排序、Um 与真 RMS |
 | 结果稳定门 | `g_measurement_stabilizer.v` | 连续测量帧 → 稳定结果 | 两帧一致性判断、拒绝改频/开关通道的过渡帧 |
 | 时域显示 | `g_time_domain_display.v` | 20 MSPS FIR 流 → 800 点 | 环形缓存、整体 Vpp、一/三周期图 |
@@ -311,6 +315,29 @@ period_samples = round(20 MHz/f0)
 
 时域图不是改变测量数据，而是只在显示支路对相邻真实样点做线性插值。500 kHz 在 20 MSPS 下每周期有 40 个真实点，直接最近邻扩展到 800 列会出现长平台；插值后的曲线更连续，同时 Vpp、RMS、FFT 与校准仍使用原始样本，不会为了“好看”篡改测量值。
 
+### 4.9 相位识别：精确频率相关而不是直接读 FFT 相角
+
+相位是本工程的超指标展示，不属于赛题正式验收必需项。`g_phase_estimator.v` 旁路读取与 FFT 完全相同、已经且仅已经过一次 Hann 加窗的 4096 点帧，不反压也不修改原频率/幅值链。对频谱模块已经插值得到的每个频率 `f_h`，以 Hann 中心 `2047.5` 点为参考做
+
+```text
+C_h = Σ x[n]·cos(2πf_h(n-2047.5)/Fs)
+S_h = Σ x[n]·sin(2πf_h(n-2047.5)/Fs)
+phi_h = atan2(C_h,S_h)
+```
+
+`atan2(C,S)` 对应赛题的正弦相位。直接读取最近 FFT bin 的相角会同时带入 bin 偏差与帧起点误差；这里用亚 bin 频率重新相关，4096 点正弦 ROM 由 32 bit NCO 寻址，再由 18 级迭代 CORDIC 输出一周 Q16 相角。
+
+屏幕显示的不是不可复现的“绝对采样起点相位”，而是谐波相对基波相位。先按频率升序取最低频分量为基波，并计算
+
+```text
+m_h = round(f_h/f_1)
+Delta_phi_h = wrap360(phi_h-m_h·phi_1)
+```
+
+只有 `m_h>=2` 且 `|f_h-m_h·f_1|<=500 Hz` 才认为它是谐波，否则输出无效值 `999`。若整帧相对时间平移 `Δt`，`phi_h` 增加 `m_h·ω_1Δt`，而 `m_h·phi_1` 增加同样的量，两者相减后抵消；纯延时和理想线性相位 FIR 也因此抵消。模拟前端若存在非线性相频响应，残差 `psi(mf_1)-m·psi(f_1)` 不会自动抵消，必要时需另做频率相关的相位校准。
+
+连续两帧必须具有相同的分量有效性与有效谐波阶次，圆周相位差不超过 3° 才发布。圆周距离会把 359° 与 1° 视为相差 2°。无效分量不比较噪声造成的伪阶次，因此谐波消失后可以稳定发布 `999`，不会一直保留旧角度。相位显示分辨率为 1°；分辨率不等于实板绝对精度，最终精度还受信噪比、ADC 极性和模拟链相频响应影响。
+
 ## 5. 串口屏协议与交互
 
 TJC8048X270_11 使用 115200、8-N-1：FPGA TX=W18，RX=W19。R19/PL KEY1 低有效，经过 20 ms 消抖，每次按下只发送一次完整页面，不做周期刷新。
@@ -324,7 +351,9 @@ TJC8048X270_11 使用 115200、8-N-1：FPGA TX=W18，RX=W19。R19/PL KEY1 低有
 | `x6` / `x7` | 第三分量 Um（10 μV/LSB）/ 频率（1 Hz/LSB） | mV（两位）/ kHz（三位） |
 | `s0` | 800 个 8 bit 点 | 800×256 定性图 |
 
-幅值由 μV 四舍五入为 10 μV 单位，例如 246800 μV 发送 `24680`，控件设两位小数后显示 `246.80 mV`。频率以整数 Hz 原样发送，例如 12345 Hz 发送 `12345`，控件设三位小数后显示 `12.345 kHz`。按钮返回 ASCII：`C=0x43` 校准、`1=0x31` 单周期、`3=0x33` 三周期、`S=0x53` 频谱。
+幅值由 μV 四舍五入为 10 μV 单位，例如 246800 μV 发送 `24680`，控件设两位小数后显示 `246.80 mV`。频率以整数 Hz 原样发送，例如 12345 Hz 发送 `12345`，控件设三位小数后显示 `12.345 kHz`。按钮返回 ASCII：`C=0x43` 校准、`1=0x31` 单周期、`3=0x33` 三周期、`S=0x53` 频谱、`P=0x50` 相位页。
+
+相位页复用该页面自己的局部控件名：基波固定显示 `0°`，`x0` 显示第一个高次分量的 `Delta_phi`，`x1` 显示第二个高次分量；两项均为 0～359 的无小数整数，缺失或非谐波发送 `999`。它们按频率升序对应实际检测到的两个高次分量，不承诺固定为二次、三次谐波。第二页应在“页面初始化事件”完成切页后执行 `printh 50`，并把 `x0/x1` 最大值设为至少 999。FPGA 对一对相位做原子快照，只发送 `x0.val=...` 与 `x1.val=...`，不会夹入 `addt` 的 800 字节透明数据流，也不会改变当前波形/频谱模式。
 
 图形先发送 `cle s0.id,0` 清除旧轨迹，再发送 `addt s0.id,0,800` 和三个 `0xFF`；收到屏幕 `0xFE` 后发送 800 个原始字节，等待 `0xFD` 完成。发送前先把显示 RAM 复制到快照 BRAM，防止 UART 慢速传输期间后台更新造成画面前后半帧不一致。FE/FD 等待均有超时回收，丢失一次握手不会让模式按钮永久卡死。
 
@@ -350,11 +379,12 @@ TJC8048X270_11 使用 115200、8-N-1：FPGA TX=W18，RX=W19。R19/PL KEY1 低有
 - overrun、FFT protocol error、UART framing error、transparent timeout 等错误采用 sticky 标志，便于仿真和内部状态闭环检查。
 - 正式 release 不实例化 ILA，不占用调试 BRAM/LUT，也不需要 `.ltx`。历史 ILA 指南和导出文件仅用于复盘旧问题。
 
-2026-07-31 最终无 ILA release 为 6339 LUT、11190 FF、44.5 BRAM tile、40 DSP；
-200 MHz 建立裕量 `+0.073 ns`、TNS `0`，保持裕量 `+0.034 ns`、THS `0`，无未约束
-内部路径，DRC 为 `0 Error / 0 Critical Warning`。用户确认的 `−0.104 ns` 临时上板
-容许量最终没有用到；本镜像本身已满足建立/保持时序。裕量仍然较窄，任何 RTL、IP
-或 XDC 改动后都必须完整重新实现，不能沿用旧 bitstream 的时序结论。
+2026-08-01 含相位超指标支路的无 ILA release 为 7794 LUT、12332 FF、50.5 BRAM
+tile、51 DSP；200 MHz 建立裕量 `+0.160 ns`、TNS `0`，保持裕量 `+0.034 ns`、
+THS `0`，无未约束内部路径，DRC 为 `0 Error / 0 Critical Warning`。用户确认的
+`−0.104 ns` 临时上板容许量最终没有用到；本镜像本身已满足建立/保持时序。裕量
+仍然较窄，任何 RTL、IP 或 XDC 改动后都必须完整重新实现，不能沿用旧 bitstream
+的时序结论。
 
 ## 7. 验证闭环与常用命令
 
@@ -377,6 +407,8 @@ powershell -ExecutionPolicy Bypass -File scripts/run_g_fft_spectrum_xsim.ps1
 powershell -ExecutionPolicy Bypass -File scripts/run_g_measurement_calibrator_xsim.ps1
 powershell -ExecutionPolicy Bypass -File scripts/run_g_measurement_stabilizer_xsim.ps1
 powershell -ExecutionPolicy Bypass -File scripts/run_g_display_builders_xsim.ps1
+powershell -ExecutionPolicy Bypass -File scripts/run_g_cordic_atan2_xsim.ps1
+powershell -ExecutionPolicy Bypass -File scripts/run_g_phase_estimator_xsim.ps1
 powershell -ExecutionPolicy Bypass -File scripts/run_g_tjc_display_uart_xsim.ps1
 ```
 
@@ -403,6 +435,7 @@ powershell -ExecutionPolicy Bypass -File scripts/run_g_board_ila_build.ps1
 5. 输入已知二音/三音，分别核对 Um、频率、总 RMS 和相位相关的整体 Vpp；
 6. 加入 1 MHz 以上干扰，评估模拟前端完成后任务 3 的抑制能力；
 7. 最后验证串口屏按钮、R19 单次发送、透明传图和超时恢复。
+8. 切到相位页触发 `P`，至少检查同相 1/2/4 次谐波为 `0°/0°`、单音为 `999/999`，以及弱基波 `phi1=100°、phi2=40°、phi4=0°` 时为 `200°/320°`。
 
 ## 8. 如何判断结果是否合理
 
@@ -413,6 +446,7 @@ powershell -ExecutionPolicy Bypass -File scripts/run_g_board_ila_build.ps1
 - 定性波形和频谱都自动归一化，图的高度不能代替数值标定。
 - 幅值全频段一致并不证明绝对 mV 正确；前者主要验证 Hann/scalloping/FIR 补偿，后者由 50 Ω 条件下的整机校准决定。
 - 频率显示到 1 Hz 不代表精度为 1 Hz；题目判据仍是与信号源标称值相差不超过 1 kHz。
+- 相位页的基波 0° 是相对参考，不是 ADC 采样时刻的绝对相位；`999` 表示缺失、非谐波或结果尚未稳定，绝不能解释为 0°。
 
 ## 9. 目录和开发环境
 
@@ -433,6 +467,7 @@ powershell -ExecutionPolicy Bypass -File scripts/run_g_board_ila_build.ps1
 1. 完成 50 Ω 模拟前端与 500 kHz 通带平坦、1 MHz 起衰减的抗混叠低通，并实测幅频响应。
 2. 若模拟链路残余频响超过误差预算，引入按频率分段的 `K(f)` 增益表，而不是只用一个全频段标量。
 3. 用高精度频率计或标准源测定 2 MHz 等效采样率误差，必要时增加频率校准系数。
-4. 对相邻谱线、低信噪比和非谐波输入建立拒绝/置信度规则，防止把噪声峰作为有效谐波。
+4. 对相邻谱线、低信噪比和非谐波输入建立更严格的拒绝/置信度规则，防止把稳定杂散作为有效幅值或相位。
 5. 若资源和时序允许，可把 MATLAB 的多正弦最小二乘拟合或 Goertzel 精修用于已检测频率附近；当前题目精度下不是必需项。
 6. 最终硬件定型后重新执行 MATLAB、XSim、实现、50 Ω 标定和三项题目全量回归，并保存输入设置、release bit、报告与结果表，形成可追溯提交版本。
+7. 若实测相位误差随频率稳定变化，建立 `psi(f)` 相频标定表；电压增益校准只修正幅值，不能校正相位。

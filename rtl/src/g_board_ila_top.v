@@ -29,6 +29,7 @@ module g_board_ila_top (
     (* max_fanout = 64 *) reg pipeline_rst_n;
     (* max_fanout = 64 *) reg fft_rst_n;
     (* max_fanout = 64 *) reg analyzer_rst_n;
+    (* max_fanout = 64 *) reg phase_rst_n;
     (* max_fanout = 64 *) reg time_display_rst_n;
     (* max_fanout = 64 *) reg spectrum_display_rst_n;
     (* max_fanout = 64 *) reg screen_rst_n;
@@ -102,6 +103,13 @@ module g_board_ila_top (
     wire [15:0] peak1_amplitude_code;
     wire [15:0] peak2_amplitude_code;
     wire [4:0] result_block_exponent;
+    wire phase_results_valid;
+    wire harmonic1_phase_valid;
+    wire harmonic2_phase_valid;
+    wire [8:0] harmonic1_phase_deg;
+    wire [8:0] harmonic2_phase_deg;
+    wire phase_estimator_busy;
+    wire [2:0] phase_error_sticky;
 
     // UART handoff interface. Values are sorted by ascending frequency;
     // amplitude is sine peak voltage and all voltage quantities use uV.
@@ -239,6 +247,7 @@ module g_board_ila_top (
             pipeline_rst_n <= 1'b0;
             fft_rst_n <= 1'b0;
             analyzer_rst_n <= 1'b0;
+            phase_rst_n <= 1'b0;
             time_display_rst_n <= 1'b0;
             spectrum_display_rst_n <= 1'b0;
             screen_rst_n <= 1'b0;
@@ -247,6 +256,7 @@ module g_board_ila_top (
             pipeline_rst_n <= 1'b1;
             fft_rst_n <= 1'b1;
             analyzer_rst_n <= 1'b1;
+            phase_rst_n <= 1'b1;
             time_display_rst_n <= 1'b1;
             spectrum_display_rst_n <= 1'b1;
             screen_rst_n <= 1'b1;
@@ -420,6 +430,27 @@ module g_board_ila_top (
         .result_block_exponent(result_block_exponent)
     );
 
+    // Phase is estimated in a parallel read-only branch from the same
+    // once-windowed samples used by the FFT.  It cannot perturb the existing
+    // frequency, amplitude, calibration or display-rendering data paths.
+    g_phase_estimator phase_estimator (
+        .clk(clk_200), .rst_n(phase_rst_n),
+        .fft_valid(fft_valid), .fft_ready(fft_input_ready),
+        .fft_real(fft_real), .fft_last(fft_last),
+        .spectrum_results_valid(spectrum_results_valid),
+        .component_count(component_count),
+        .peak0_frequency_hz(peak0_frequency_hz),
+        .peak1_frequency_hz(peak1_frequency_hz),
+        .peak2_frequency_hz(peak2_frequency_hz),
+        .phase_results_valid(phase_results_valid),
+        .harmonic1_phase_valid(harmonic1_phase_valid),
+        .harmonic2_phase_valid(harmonic2_phase_valid),
+        .harmonic1_phase_deg(harmonic1_phase_deg),
+        .harmonic2_phase_deg(harmonic2_phase_deg),
+        .busy(phase_estimator_busy),
+        .error_sticky(phase_error_sticky)
+    );
+
     // Field calibration is initiated by the TJC screen sending ASCII 'C'.
     // The reference is fixed to the documented 200 mVpp calibration sine.
     g_measurement_calibrator measurement_calibrator (
@@ -529,6 +560,11 @@ module g_board_ila_top (
         .component0_amplitude_uv(component0_amplitude_uv),
         .component1_amplitude_uv(component1_amplitude_uv),
         .component2_amplitude_uv(component2_amplitude_uv),
+        .phase_results_valid(phase_results_valid),
+        .harmonic1_phase_valid(harmonic1_phase_valid),
+        .harmonic2_phase_valid(harmonic2_phase_valid),
+        .harmonic1_phase_deg(harmonic1_phase_deg),
+        .harmonic2_phase_deg(harmonic2_phase_deg),
         .waveform_display_ready(waveform_display_ready),
         .waveform_render_busy(waveform_render_busy),
         .waveform_render_done(waveform_render_done),

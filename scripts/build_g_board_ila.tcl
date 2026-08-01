@@ -19,6 +19,9 @@ add_files [list \
     [file join $project_root rtl src g_fft_input_stream.v] \
     [file join $project_root rtl src g_integer_sqrt.v] \
     [file join $project_root rtl src g_unsigned_divider.v] \
+    [file join $project_root rtl src g_sine_cos_rom.v] \
+    [file join $project_root rtl src g_cordic_atan2.v] \
+    [file join $project_root rtl src g_phase_estimator.v] \
     [file join $project_root rtl src g_uart_tx.v] \
     [file join $project_root rtl src g_uart_rx.v] \
     [file join $project_root rtl src g_binary_to_bcd.v] \
@@ -142,8 +145,10 @@ puts $manifest "Time-domain history: 65536 post-FIR samples, supports one/three 
 puts $manifest "UART: W18 TX / W19 RX, LVCMOS33, 115200 8-N-1"
 puts $manifest "Send button: PL KEY1 R19, active low, 20 ms debounce"
 puts $manifest "Screen: TJC8048X270_11, one 800x256 waveform component s0"
-puts $manifest "Screen commands: C(0x43) calibrate, 1(0x31), 3(0x33), S(0x53) spectrum"
+puts $manifest "Screen commands: C(0x43) calibrate, 1(0x31), 3(0x33), S(0x53) spectrum, P(0x50) phase page"
 puts $manifest "Screen transfer: cle s0.id,0 then x0..x7 plus addt s0.id,0,800 with FE/FD handshake"
+puts $manifest "Phase transfer: P sends x0/x1 only; integer degrees 0..359, invalid/missing=999"
+puts $manifest "Phase definition: wrap(phi_h-h*phi_1), sine convention, 1 degree display resolution"
 puts $manifest "Screen voltage format: 10 uV/unit, configure x0/x1/x2/x4/x6 for 2 decimal places in mV"
 puts $manifest "Screen frequency format: 1 Hz/unit, configure x3/x5/x7 for 3 decimal places in kHz"
 puts $manifest "Spectrum display: bins 0/1 blanked only in the qualitative plot; bin 2 remains the 1 kHz measurement/display boundary"

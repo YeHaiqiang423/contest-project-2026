@@ -19,6 +19,11 @@ module tb_g_tjc_display_uart;
     logic [23:0] component0_amplitude_uv = 24'd61700;
     logic [23:0] component1_amplitude_uv = 24'd22500;
     logic [23:0] component2_amplitude_uv = 24'd17600;
+    logic phase_results_valid = 1'b0;
+    logic harmonic1_phase_valid = 1'b0;
+    logic harmonic2_phase_valid = 1'b0;
+    logic [8:0] harmonic1_phase_deg = 9'd0;
+    logic [8:0] harmonic2_phase_deg = 9'd0;
     logic waveform_display_ready = 1'b1;
     logic waveform_render_busy = 1'b0;
     logic waveform_render_done = 1'b0;
@@ -68,6 +73,11 @@ module tb_g_tjc_display_uart;
         .component0_amplitude_uv(component0_amplitude_uv),
         .component1_amplitude_uv(component1_amplitude_uv),
         .component2_amplitude_uv(component2_amplitude_uv),
+        .phase_results_valid(phase_results_valid),
+        .harmonic1_phase_valid(harmonic1_phase_valid),
+        .harmonic2_phase_valid(harmonic2_phase_valid),
+        .harmonic1_phase_deg(harmonic1_phase_deg),
+        .harmonic2_phase_deg(harmonic2_phase_deg),
         .waveform_display_ready(waveform_display_ready),
         .waveform_render_busy(waveform_render_busy),
         .waveform_render_done(waveform_render_done),
@@ -153,6 +163,85 @@ module tb_g_tjc_display_uart;
         end
     endtask
 
+    task automatic append_phase_expected(
+            input integer phase0, input integer phase1);
+        begin
+            append_string($sformatf("x0.val=%0d", phase0));
+            append_terminator();
+            append_string($sformatf("x1.val=%0d", phase1));
+            append_terminator();
+        end
+    endtask
+
+    task automatic append_plot_expected(input bit use_spectrum);
+        begin
+            append_string("cle s0.id,0"); append_terminator();
+            append_string("addt s0.id,0,800"); append_terminator();
+            for (i = 0; i < 800; i++) begin
+                expected[expected_count] = use_spectrum ?
+                    8'hff-i[7:0] : i[7:0];
+                expected_count = expected_count+1;
+            end
+        end
+    endtask
+
+    task automatic clear_transaction_buffers;
+        begin
+            captured_count = 0;
+            expected_count = 0;
+        end
+    endtask
+
+    task automatic check_transaction(input string label_text);
+        begin
+            if (captured_count != expected_count) begin
+                errors = errors+1;
+                $error("%s byte count mismatch: got=%0d expected=%0d",
+                    label_text, captured_count, expected_count);
+            end
+            for (i = 0; i < expected_count && i < captured_count; i++) begin
+                if (captured[i] !== expected[i]) begin
+                    errors = errors+1;
+                    $error("%s byte %0d mismatch: got=%02x expected=%02x",
+                        label_text, i, captured[i], expected[i]);
+                end
+            end
+        end
+    endtask
+
+    task automatic publish_phase_pair(
+            input bit valid0, input integer phase0,
+            input bit valid1, input integer phase1);
+        begin
+            @(negedge clk);
+            harmonic1_phase_valid = valid0;
+            harmonic2_phase_valid = valid1;
+            harmonic1_phase_deg = phase0[8:0];
+            harmonic2_phase_deg = phase1[8:0];
+            phase_results_valid = 1'b1;
+            @(negedge clk);
+            phase_results_valid = 1'b0;
+            repeat (20) @(posedge clk);
+        end
+    endtask
+
+    task automatic wait_phase_completion;
+        begin
+            wait (dut.tx_state == 4'd10);
+            if (!transfer_busy) begin
+                errors = errors+1;
+                $error("Phase transfer_busy dropped before final byte drain");
+            end
+            wait (transfer_done);
+            #1;
+            if (tx_busy || transfer_busy) begin
+                errors = errors+1;
+                $error("Phase transfer_done preceded physical UART completion");
+            end
+            @(posedge clk);
+        end
+    endtask
+
     task automatic send_rx_byte(input byte value);
         integer bit_number;
         begin
@@ -164,6 +253,14 @@ module tb_g_tjc_display_uart;
             end
             uart_rx = 1'b1;
             repeat (CLKS_PER_BIT*2) @(posedge clk);
+        end
+    endtask
+
+    task automatic request_phase_and_wait;
+        begin
+            send_rx_byte(8'h50);
+            wait (dut.tx_state == 4'd9);
+            wait_phase_completion();
         end
     endtask
 
@@ -289,8 +386,90 @@ module tb_g_tjc_display_uart;
                 three_cycle_mode, spectrum_mode);
         end
 
+        // No phase result has arrived since reset.  'P' must still respond
+        // immediately with two invalid sentinels and must not send a plot.
+        clear_transaction_buffers();
+        append_phase_expected(999, 999);
+        request_phase_and_wait();
+        check_transaction("reset-invalid phase");
+        if (!three_cycle_mode || !spectrum_mode || render_pulses != 1 ||
+                calibration_pulses != 1) begin
+            errors = errors+1;
+            $error("P changed plot/calibration state before phase results");
+        end
+
+        // Boundary values are integer degrees.  Update the producer while x0
+        // is already being sent: the active transaction must retain 0/359.
+        publish_phase_pair(1'b1, 0, 1'b1, 359);
+        clear_transaction_buffers();
+        append_phase_expected(0, 359);
+        send_rx_byte(8'h50);
+        wait (dut.tx_state == 4'd9);
+        publish_phase_pair(1'b1, 45, 1'b1, 270);
+        wait_phase_completion();
+        check_transaction("atomic 0/359 phase");
+
+        // The next request observes the pair published during the prior send.
+        clear_transaction_buffers();
+        append_phase_expected(45, 270);
+        request_phase_and_wait();
+        check_transaction("updated 45/270 phase");
+
+        // Invalid flags and values above 359 both map to the reserved 999.
+        publish_phase_pair(1'b0, 123, 1'b1, 360);
+        clear_transaction_buffers();
+        append_phase_expected(999, 999);
+        request_phase_and_wait();
+        check_transaction("invalid phase mapping");
+
+        if (!three_cycle_mode || !spectrum_mode || render_pulses != 1 ||
+                calibration_pulses != 1) begin
+            errors = errors+1;
+            $error("P changed an existing plot/calibration selection");
+        end
+
+        // Queue P in the middle of an 800-byte transparent waveform transfer.
+        // It may start only after the display returns FD and must follow, not
+        // corrupt, the exact transparent byte stream.
+        publish_phase_pair(1'b1, 10, 1'b1, 20);
+        clear_transaction_buffers();
+        append_plot_expected(1'b0);
+        append_phase_expected(10, 20);
+        send_rx_byte(8'h31);
+        repeat (5) @(posedge clk);
+        @(negedge clk);
+        waveform_render_done = 1'b1;
+        @(negedge clk);
+        waveform_render_done = 1'b0;
+        wait (dut.tx_state == 4'd4);
+        send_rx_byte(8'hfe);
+        wait (dut.tx_state == 4'd5);
+        send_rx_byte(8'h50);
+        if (!dut.phase_request_pending) begin
+            errors = errors+1;
+            $error("P was not queued during transparent transfer");
+        end
+        wait (dut.tx_state == 4'd6);
+        wait (!tx_busy);
+        send_rx_byte(8'hfd);
+        wait (dut.tx_state == 4'd9);
+        wait_phase_completion();
+        check_transaction("transparent-busy queued phase");
+
+        repeat (2) @(posedge clk);
+        #1;
+        if (calibration_pulses != 1 || render_pulses != 2 ||
+                three_cycle_mode || spectrum_mode ||
+                transfer_pulses != 10 || rx_framing_error_sticky ||
+                transparent_timeout_sticky || request_overrun) begin
+            errors = errors+1;
+            $error("Phase command/status failure: cal=%0d render=%0d transfer=%0d mode=%0b/%0b overrun=%0b",
+                calibration_pulses, render_pulses, transfer_pulses,
+                three_cycle_mode, spectrum_mode, request_overrun);
+        end
+
         if (errors == 0)
-            $display("PASS: TJC sends three-decimal-kHz frequencies and two-decimal-mV amplitudes, clears s0, debounces R19, switches display modes and completes FE/FD-guarded 800-byte addt transfers");
+            $display("PASS: TJC numeric/plot paths plus atomic queued P-page 0..359/999 phase transfers completed without transparent-stream insertion");
         else
             $fatal(1, "FAIL: %0d TJC UART errors", errors);
         $finish;

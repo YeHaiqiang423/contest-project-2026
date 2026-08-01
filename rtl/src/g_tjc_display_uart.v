@@ -7,6 +7,7 @@
 //   31 ('1') = waveform, one complete fundamental period
 //   33 ('3') = waveform, three complete fundamental periods
 //   53 ('S') = positive-frequency spectrum
+//   50 ('P') = phase page values only (x0/x1, no plot transfer)
 //
 // R19 sends x0..x7 followed by the currently selected 800-point s0 image.
 // Plot-only touch requests redraw s0 immediately.  addt uses the documented
@@ -34,6 +35,12 @@ module g_tjc_display_uart #(
     input  wire [23:0] component0_amplitude_uv,
     input  wire [23:0] component1_amplitude_uv,
     input  wire [23:0] component2_amplitude_uv,
+
+    input  wire        phase_results_valid,
+    input  wire        harmonic1_phase_valid,
+    input  wire        harmonic2_phase_valid,
+    input  wire [8:0]  harmonic1_phase_deg,
+    input  wire [8:0]  harmonic2_phase_deg,
 
     input  wire        waveform_display_ready,
     input  wire        waveform_render_busy,
@@ -71,6 +78,8 @@ module g_tjc_display_uart #(
     localparam [3:0] TX_WAIT_FD = 4'd6;
     localparam [3:0] TX_CLEAR = 4'd7;
     localparam [3:0] TX_COPY_WAIT = 4'd8;
+    localparam [3:0] TX_PHASE_NUMERIC = 4'd9;
+    localparam [3:0] TX_PHASE_DRAIN = 4'd10;
 
     wire [7:0] rx_data;
     wire rx_valid;
@@ -106,12 +115,27 @@ module g_tjc_display_uart #(
     reg [31:0] bcd_x7;
     reg have_snapshot;
 
+    reg phase_bcd_start;
+    reg [9:0] phase_binary0;
+    reg [9:0] phase_binary1;
+    wire phase_bcd0_busy;
+    wire phase_bcd1_busy;
+    wire phase_bcd0_valid;
+    wire phase_bcd1_valid;
+    wire [31:0] phase_bcd0;
+    wire [31:0] phase_bcd1;
+    reg [31:0] phase_bcd_snapshot0;
+    reg [31:0] phase_bcd_snapshot1;
+    reg [31:0] phase_tx_bcd0;
+    reg [31:0] phase_tx_bcd1;
+
     (* ASYNC_REG = "TRUE" *) reg [1:0] button_sync;
     reg button_stable_n;
     reg [31:0] button_debounce_counter;
 
     reg full_request_pending;
     reg plot_request_pending;
+    reg phase_request_pending;
     reg waveform_refresh_seen;
     reg selected_transfer_spectrum;
     reg selected_transfer_full;
@@ -131,6 +155,10 @@ module g_tjc_display_uart #(
     wire [3:0] selected_last_digit;
     wire [3:0] selected_digit_count;
     wire [4:0] numeric_final_index;
+    wire phase_command;
+    wire phase_request_serve;
+    wire [3:0] phase_selected_digit_count;
+    wire [4:0] phase_numeric_final_index;
 
     assign calibration_reference_vpp_uv = 24'd200000;
     assign selected_display_ready = spectrum_mode ?
@@ -145,6 +173,12 @@ module g_tjc_display_uart #(
         numeric_field == 4'd5 || numeric_field == 4'd7) ? 4'd7 : 4'd6;
     assign selected_digit_count = selected_last_digit-digit_start+1'b1;
     assign numeric_final_index = 5'd7+selected_digit_count+5'd2;
+    assign phase_command = rx_valid && (rx_data == 8'h50);
+    assign phase_request_serve = (tx_state == TX_IDLE) &&
+        phase_request_pending;
+    assign phase_selected_digit_count = 4'd8-digit_start;
+    assign phase_numeric_final_index =
+        5'd7+phase_selected_digit_count+5'd2;
 
     g_uart_rx #(.CLK_HZ(CLK_HZ), .BAUD(BAUD)) screen_uart_rx (
         .clk(clk), .rst_n(rst_n), .rx(uart_rx), .data(rx_data),
@@ -187,6 +221,17 @@ module g_tjc_display_uart #(
         .clk(clk), .rst_n(rst_n), .start(bcd_start),
         .binary({5'd0, component2_frequency_hz}), .busy(),
         .valid(bcd7_valid), .bcd(bcd7));
+
+    // Phase-page values are unscaled integer degrees.  Invalid or out-of-range
+    // inputs are converted to the reserved display sentinel 999.
+    g_binary_to_bcd #(.BINARY_WIDTH(10), .DIGITS(8)) phase0_bcd (
+        .clk(clk), .rst_n(rst_n), .start(phase_bcd_start),
+        .binary(phase_binary0), .busy(phase_bcd0_busy),
+        .valid(phase_bcd0_valid), .bcd(phase_bcd0));
+    g_binary_to_bcd #(.BINARY_WIDTH(10), .DIGITS(8)) phase1_bcd (
+        .clk(clk), .rst_n(rst_n), .start(phase_bcd_start),
+        .binary(phase_binary1), .busy(phase_bcd1_busy),
+        .valid(phase_bcd1_valid), .bcd(phase_bcd1));
 
     function [31:0] selected_bcd;
         input [3:0] field_number;
@@ -272,6 +317,67 @@ module g_tjc_display_uart #(
         end
     endfunction
 
+    function [7:0] phase_decimal_digit;
+        input field_number;
+        input [3:0] digit_number;
+        reg [31:0] value;
+        reg [3:0] nibble;
+        begin
+            value = field_number ? phase_tx_bcd1 : phase_tx_bcd0;
+            case (digit_number)
+                0: nibble = value[31:28];
+                1: nibble = value[27:24];
+                2: nibble = value[23:20];
+                3: nibble = value[19:16];
+                4: nibble = value[15:12];
+                5: nibble = value[11:8];
+                6: nibble = value[7:4];
+                default: nibble = value[3:0];
+            endcase
+            phase_decimal_digit = 8'h30+{4'd0, nibble};
+        end
+    endfunction
+
+    function [3:0] phase_first_digit;
+        input [31:0] value;
+        begin
+            if (value[31:28] != 4'd0) phase_first_digit = 4'd0;
+            else if (value[27:24] != 4'd0) phase_first_digit = 4'd1;
+            else if (value[23:20] != 4'd0) phase_first_digit = 4'd2;
+            else if (value[19:16] != 4'd0) phase_first_digit = 4'd3;
+            else if (value[15:12] != 4'd0) phase_first_digit = 4'd4;
+            else if (value[11:8] != 4'd0) phase_first_digit = 4'd5;
+            else if (value[7:4] != 4'd0) phase_first_digit = 4'd6;
+            else phase_first_digit = 4'd7;
+        end
+    endfunction
+
+    function [7:0] phase_numeric_character;
+        input field_number;
+        input [4:0] character_number;
+        input [3:0] first_number;
+        reg [3:0] count;
+        begin
+            count = 4'd8-first_number;
+            case (character_number)
+                0: phase_numeric_character = "x";
+                1: phase_numeric_character = "0"+field_number;
+                2: phase_numeric_character = ".";
+                3: phase_numeric_character = "v";
+                4: phase_numeric_character = "a";
+                5: phase_numeric_character = "l";
+                6: phase_numeric_character = "=";
+                default: begin
+                    if (character_number < 7+count)
+                        phase_numeric_character = phase_decimal_digit(
+                            field_number, first_number+character_number-7);
+                    else
+                        phase_numeric_character = 8'hff;
+                end
+            endcase
+        end
+    endfunction
+
     function [7:0] addt_character;
         input [4:0] character_number;
         begin
@@ -349,8 +455,40 @@ module g_tjc_display_uart #(
                         waveform_render_request <= 1'b1;
                     end
                     8'h53: spectrum_mode <= 1'b1;
+                    // 'P' is consumed by the transaction scheduler.  It does
+                    // not alter the currently selected plot or calibration.
+                    8'h50: begin end
                     default: begin end
                 endcase
+            end
+        end
+    end
+
+    // Convert and retain one coherent pair of phase-page values.  Resetting
+    // the snapshot to 999 lets the page respond immediately before the first
+    // phase estimate is available.
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            phase_bcd_start <= 1'b0;
+            phase_binary0 <= 10'd999;
+            phase_binary1 <= 10'd999;
+            phase_bcd_snapshot0 <= 32'h00000999;
+            phase_bcd_snapshot1 <= 32'h00000999;
+        end else begin
+            phase_bcd_start <= 1'b0;
+            if (phase_results_valid && !phase_bcd0_busy &&
+                    !phase_bcd1_busy) begin
+                phase_binary0 <= harmonic1_phase_valid &&
+                    (harmonic1_phase_deg <= 9'd359) ?
+                    {1'b0, harmonic1_phase_deg} : 10'd999;
+                phase_binary1 <= harmonic2_phase_valid &&
+                    (harmonic2_phase_deg <= 9'd359) ?
+                    {1'b0, harmonic2_phase_deg} : 10'd999;
+                phase_bcd_start <= 1'b1;
+            end
+            if (phase_bcd0_valid && phase_bcd1_valid) begin
+                phase_bcd_snapshot0 <= phase_bcd0;
+                phase_bcd_snapshot1 <= phase_bcd1;
             end
         end
     end
@@ -410,6 +548,7 @@ module g_tjc_display_uart #(
         if (!rst_n) begin
             full_request_pending <= 1'b0;
             plot_request_pending <= 1'b0;
+            phase_request_pending <= 1'b0;
             waveform_refresh_seen <= 1'b1;
             selected_transfer_spectrum <= 1'b0;
             selected_transfer_full <= 1'b0;
@@ -425,6 +564,8 @@ module g_tjc_display_uart #(
             plot_snapshot_read_data <= 8'd0;
             tx_start <= 1'b0;
             tx_data <= 8'hff;
+            phase_tx_bcd0 <= 32'h00000999;
+            phase_tx_bcd1 <= 32'h00000999;
             transfer_busy <= 1'b0;
             transfer_done <= 1'b0;
             transparent_timeout_sticky <= 1'b0;
@@ -451,12 +592,32 @@ module g_tjc_display_uart #(
             end
             if (waveform_render_done)
                 waveform_refresh_seen <= 1'b1;
+            // A phase request may wait behind any active numeric or transparent
+            // transfer.  Set dominates dequeue so a new 'P' arriving on the
+            // exact cycle an older request starts remains queued.
+            if (phase_command) begin
+                if (phase_request_pending && !phase_request_serve)
+                    request_overrun <= 1'b1;
+                phase_request_pending <= 1'b1;
+            end
 
             case (tx_state)
                 TX_IDLE: begin
                     transfer_busy <= 1'b0;
                     handshake_counter <= 32'd0;
-                    if (full_request_pending && have_snapshot &&
+                    if (phase_request_pending) begin
+                        if (!phase_command)
+                            phase_request_pending <= 1'b0;
+                        phase_tx_bcd0 <= phase_bcd_snapshot0;
+                        phase_tx_bcd1 <= phase_bcd_snapshot1;
+                        numeric_field <= 4'd0;
+                        digit_start <= phase_first_digit(
+                            phase_bcd_snapshot0);
+                        command_index <= 5'd0;
+                        transfer_busy <= 1'b1;
+                        request_wait_counter <= 32'd0;
+                        tx_state <= TX_PHASE_NUMERIC;
+                    end else if (full_request_pending && have_snapshot &&
                             selected_display_ready &&
                             (spectrum_mode || !waveform_render_busy)) begin
                         selected_transfer_spectrum <= spectrum_mode;
@@ -537,6 +698,36 @@ module g_tjc_display_uart #(
                         end else begin
                             command_index <= command_index+1'b1;
                         end
+                    end
+                end
+
+                TX_PHASE_NUMERIC: begin
+                    if (!tx_busy && !tx_start) begin
+                        tx_data <= phase_numeric_character(numeric_field[0],
+                            command_index, digit_start);
+                        tx_start <= 1'b1;
+                        if (command_index == phase_numeric_final_index) begin
+                            command_index <= 5'd0;
+                            if (numeric_field[0]) begin
+                                // Wait for the final 0xff byte to physically
+                                // finish before declaring this transaction done.
+                                tx_state <= TX_PHASE_DRAIN;
+                            end else begin
+                                numeric_field <= 4'd1;
+                                digit_start <= phase_first_digit(
+                                    phase_tx_bcd1);
+                            end
+                        end else begin
+                            command_index <= command_index+1'b1;
+                        end
+                    end
+                end
+
+                TX_PHASE_DRAIN: begin
+                    if (tx_done) begin
+                        transfer_busy <= 1'b0;
+                        transfer_done <= 1'b1;
+                        tx_state <= TX_IDLE;
                     end
                 end
 
