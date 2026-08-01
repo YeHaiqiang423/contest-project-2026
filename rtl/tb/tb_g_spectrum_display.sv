@@ -34,7 +34,11 @@ module tb_g_spectrum_display;
         for (bin_index = 0; bin_index <= 1229; bin_index++) begin
             @(negedge clk);
             spectrum_bin = bin_index;
-            if (bin_index == 128)
+            if (bin_index == 0 || bin_index == 1)
+                spectrum_power = 33'd9000000; // masked DC/Hann skirt
+            else if (bin_index == 2)
+                spectrum_power = 33'd360000;  // real 1 kHz magnitude 600
+            else if (bin_index == 128)
                 spectrum_power = 33'd1000000; // magnitude 1000
             else if (bin_index == 512)
                 spectrum_power = 33'd250000;  // magnitude 500
@@ -55,6 +59,22 @@ module tb_g_spectrum_display;
         if (display_read_data < 250) begin
             errors = errors+1;
             $error("Strong spectrum peak was not normalized to full scale: %0d",
+                display_read_data);
+        end
+        display_read_addr = 24;
+        @(posedge clk);
+        #1;
+        if (display_read_data != 0) begin
+            errors = errors+1;
+            $error("DC/bin-1 display impulse was not blanked: %0d",
+                display_read_data);
+        end
+        display_read_addr = 25;
+        @(posedge clk);
+        #1;
+        if (display_read_data < 150 || display_read_data > 156) begin
+            errors = errors+1;
+            $error("Real bin-2/1 kHz display peak was not retained: %0d",
                 display_read_data);
         end
         display_read_addr = 337;
@@ -102,7 +122,7 @@ module tb_g_spectrum_display;
         end
 
         if (errors == 0)
-            $display("PASS: 0..600 kHz spectrum is max-pooled with symmetric 24-point display margins");
+            $display("PASS: DC/bin 1 are blanked while bin-2/1 kHz and the 0..600 kHz spectrum retain display scaling and margins");
         else
             $fatal(1, "FAIL: %0d spectrum display errors", errors);
         $finish;

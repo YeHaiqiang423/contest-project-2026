@@ -146,6 +146,7 @@ puts $manifest "Screen commands: C(0x43) calibrate, 1(0x31), 3(0x33), S(0x53) sp
 puts $manifest "Screen transfer: cle s0.id,0 then x0..x7 plus addt s0.id,0,800 with FE/FD handshake"
 puts $manifest "Screen voltage format: 10 uV/unit, configure x0/x1/x2/x4/x6 for 2 decimal places in mV"
 puts $manifest "Screen frequency format: 1 Hz/unit, configure x3/x5/x7 for 3 decimal places in kHz"
+puts $manifest "Spectrum display: bins 0/1 blanked only in the qualitative plot; bin 2 remains the 1 kHz measurement/display boundary"
 puts $manifest "ILA: disabled; release bitstream contains no debug core and requires no .ltx file"
 puts $manifest "Setup slack: $setup_slack ns"
 puts $manifest "Setup status: timing met"

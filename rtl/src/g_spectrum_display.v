@@ -8,6 +8,7 @@
 module g_spectrum_display #(
     parameter integer DISPLAY_POINTS = 800,
     parameter integer HORIZONTAL_MARGIN = 24,
+    parameter integer MIN_DISPLAY_BIN = 2,
     parameter integer MAX_DISPLAY_BIN = 1229
 ) (
     input  wire        clk,
@@ -181,7 +182,13 @@ module g_spectrum_display #(
                 spectrum_bin <= MAX_DISPLAY_BIN;
             if (spectrum_valid && spectrum_bin <= MAX_DISPLAY_BIN) begin
                 mapping_bin_pipe <= spectrum_bin;
-                mapping_power_pipe <= spectrum_power;
+                // The ADC zero-code offset appears as DC plus the first Hann
+                // skirt bin.  Both bins collapse into the first plot pixel,
+                // producing a misleading two-edge impulse.  Suppress them in
+                // the qualitative display only; bin 1 remains available to
+                // the analyzer as the left guard for a real bin-2/1 kHz tone.
+                mapping_power_pipe <= (spectrum_bin < MIN_DISPLAY_BIN) ?
+                    33'd0 : spectrum_power;
                 mapped_product_pipe <= spectrum_bin*MAP_SCALE_Q;
             end
 
